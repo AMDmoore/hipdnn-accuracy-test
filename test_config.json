@@ -1,0 +1,28 @@
+{
+    "model_dir": "D:/Users/shoucair/hipdnn/oga/Llama-3.1-8B",
+
+    "genai_configs": {
+        "1024": "genai_config_p1024m4096.json",
+        "12200": "genai_config_12200.json"
+    },
+
+    "tests": {
+        "PPL": {
+            "seq_lengths": [1024, 12200],
+            "params": {
+                "nsamples": 0.5
+            }
+        },
+        "MMLU": {
+            "seq_lengths": [1024],
+            "params": {}
+        },
+        "RUNMODEL": {
+            "seq_lengths": [1024, 12200],
+            "params": {
+                "prompt_file": "",
+                "max_gen_tokens": 128
+            }
+        }
+    }
+}
