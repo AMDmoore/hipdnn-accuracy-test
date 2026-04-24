@@ -1,27 +1,29 @@
 {
-    "model_dir": "D:/Users/shoucair/hipdnn/oga/Llama-3.1-8B",
+    "model_dir": "/path/to/your/oga/model",
+    "package_dir": "/path/to/your/package",
+    "therock_dist": "/path/to/therock",
 
     "genai_configs": {
-        "1024": "genai_config_p1024m4096.json",
-        "12200": "genai_config_12200.json"
+        "1024": "genai_config_1024.json",
+        "2048": "genai_config_2048.json"
     },
 
     "tests": {
         "PPL": {
-            "seq_lengths": [1024, 12200],
+            "seq_lengths": [2048],
             "params": {
-                "nsamples": 0.5
+                "nsamples": 0.02
             }
         },
         "MMLU": {
-            "seq_lengths": [1024],
+            "seq_lengths": [2048],
             "params": {}
         },
         "RUNMODEL": {
-            "seq_lengths": [1024, 12200],
+            "seq_lengths": [2048],
             "params": {
-                "prompt_file": "",
-                "max_gen_tokens": 128
+                "prompt_file": "prompts.json",
+                "max_new_tokens": 128
             }
         }
     }
