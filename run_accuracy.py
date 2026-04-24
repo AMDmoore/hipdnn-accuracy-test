@@ -4,6 +4,7 @@
 Usage:
     python run_accuracy.py --config test_config.json --tests PPL MMLU
     python run_accuracy.py --tests PPL --seq-len 1024 2048
+    python run_accuracy.py --tests MMLU --eps morphizen dml
     python run_accuracy.py --model-dir D:/path/to/model --tests RUNMODEL
 """
 
@@ -37,6 +38,33 @@ def switch_genai_config(model_dir: str, config_filename: str):
     shutil.copy2(src, dst)
 
 
+def _dml_available() -> bool:
+    """True iff this OGA build was compiled with DirectML EP support.
+
+    OGA exposes ``is_dml_available()`` (alongside ``is_cuda_available``,
+    ``is_rocm_available``, etc.) which checks the *build flag* -- not just
+    DLL discoverability. Earlier we tried probing for DirectML.dll on PATH,
+    but that's a false positive: DirectML.dll ships with OGA's runtime even
+    on builds that weren't compiled with DML support, and asking such a
+    build to run DML errors out with "DML provider requested, but the
+    installed GenAI has not been built with DML support".
+
+    We import OGA in this orchestrator process. That's safe because the
+    venv's _oga_dll_init.pth has already added the cp314 .pyd to sys.path
+    and called os.add_dll_directory() for the dependent DLLs.
+    """
+    try:
+        import onnxruntime_genai as og
+    except ImportError:
+        return False
+    if not hasattr(og, "is_dml_available"):
+        return False
+    try:
+        return bool(og.is_dml_available())
+    except Exception:
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="HipDNN Accuracy Test Framework",
@@ -62,6 +90,11 @@ def main():
     parser.add_argument(
         "--seq-len", nargs="+", type=int, default=None,
         help="Filter specific seq_lengths to run (default: all in config)",
+    )
+    parser.add_argument(
+        "--eps", nargs="+", default=None,
+        help="Filter execution providers to run (e.g. morphizen dml cpu). "
+             "Default: every EP listed under each test in the config.",
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
@@ -99,49 +132,66 @@ def main():
     print(f"Tests       : {requested_tests}")
     print()
 
+    dml_ok = _dml_available()
+
     for test_name in requested_tests:
         test_name_upper = test_name.upper()
         test_cfg = tests_config.get(test_name_upper, {})
         test_params = test_cfg.get("params", {})
         seq_lengths = test_cfg.get("seq_lengths", [])
+        test_eps = test_cfg.get("eps", [])
 
         if args.seq_len:
             seq_lengths = [s for s in seq_lengths if s in args.seq_len]
+        if args.eps:
+            test_eps = [e for e in test_eps if e in args.eps]
 
         if not seq_lengths:
             print(f"[{test_name_upper}] No matching seq_lengths to run, skipping.")
+            continue
+        if not test_eps:
+            print(f"[{test_name_upper}] No matching EPs to run, skipping.")
             continue
 
         test_cls = TEST_REGISTRY[test_name_upper]
         test_instance = test_cls()
 
-        for sl in seq_lengths:
-            config_file = genai_configs[str(sl)]
-            print(f"[{test_name_upper}] seq_len={sl}, config={config_file}")
+        for ep in test_eps:
+            if ep == "dml" and not dml_ok:
+                print(f"[{test_name_upper}] ep=dml: this OGA build was not "
+                      f"compiled with DML support (og.is_dml_available() is "
+                      f"False); skipping.")
+                continue
 
-            switch_genai_config(model_dir, config_file)
+            for sl in seq_lengths:
+                config_file = genai_configs[ep][str(sl)]
+                print(f"[{test_name_upper}] ep={ep}, seq_len={sl}, "
+                      f"config={config_file}")
 
-            result = test_instance.run(model_dir, test_params)
+                switch_genai_config(model_dir, config_file)
 
-            collector.record(
-                test_name=test_name_upper,
-                seq_len=sl,
-                config_file=config_file,
-                metrics=result.metrics,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                success=result.success,
-                error_msg=result.error_msg,
-            )
+                result = test_instance.run(model_dir, test_params)
 
-            status = "PASS" if result.success else "FAIL"
-            print(f"  => {status}")
-            if result.success and result.metrics:
-                for k, v in result.metrics.items():
-                    print(f"     {k}: {v}")
-            if not result.success:
-                print(f"     Error: {result.error_msg}")
-            print()
+                collector.record(
+                    test_name=test_name_upper,
+                    ep=ep,
+                    seq_len=sl,
+                    config_file=config_file,
+                    metrics=result.metrics,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    success=result.success,
+                    error_msg=result.error_msg,
+                )
+
+                status = "PASS" if result.success else "FAIL"
+                print(f"  => {status}")
+                if result.success and result.metrics:
+                    for k, v in result.metrics.items():
+                        print(f"     {k}: {v}")
+                if not result.success:
+                    print(f"     Error: {result.error_msg}")
+                print()
 
     collector.write_summary()
 

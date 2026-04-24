@@ -21,6 +21,7 @@ class ResultCollector:
     def record(
         self,
         test_name: str,
+        ep: str,
         seq_len: int,
         config_file: str,
         metrics: dict,
@@ -33,11 +34,13 @@ class ResultCollector:
         timestamp = datetime.now().isoformat()
 
         log_filename = (
-            f"{test_name}_seq{seq_len}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            f"{test_name}_{ep}_seq{seq_len}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         )
         log_path = os.path.join(self.log_dir, log_filename)
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"=== {test_name} | seq_len={seq_len} | {timestamp} ===\n")
+            f.write(f"=== {test_name} | ep={ep} | seq_len={seq_len} "
+                    f"| {timestamp} ===\n")
             f.write(f"config_file: {config_file}\n")
             f.write(f"success: {success}\n")
             if error_msg:
@@ -52,6 +55,7 @@ class ResultCollector:
             for metric_name, value in metrics.items():
                 self._csv_rows.append({
                     "model_name": self.model_name,
+                    "ep": ep,
                     "seq_len": seq_len,
                     "config_file": config_file,
                     "test": test_name,
@@ -63,6 +67,7 @@ class ResultCollector:
         self._detail_records.append({
             "model_name": self.model_name,
             "test": test_name,
+            "ep": ep,
             "seq_len": seq_len,
             "config_file": config_file,
             "success": success,
@@ -76,7 +81,7 @@ class ResultCollector:
         """Write CSV summary and JSON detail files."""
         csv_path = os.path.join(self.output_dir, "results_summary.csv")
         fieldnames = [
-            "model_name", "seq_len", "config_file",
+            "model_name", "ep", "seq_len", "config_file",
             "test", "metric", "value", "timestamp",
         ]
         with open(csv_path, "w", newline="", encoding="utf-8") as f:

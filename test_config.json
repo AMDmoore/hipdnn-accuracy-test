@@ -4,22 +4,32 @@
     "therock_dist": "/path/to/therock",
 
     "genai_configs": {
-        "1024": "genai_config_1024.json",
-        "2048": "genai_config_2048.json"
+        "morphizen": {
+            "2048": "genai_config_morphizen_2k.json"
+        },
+        "dml": {
+            "2048": "genai_config_dml_2k.json"
+        },
+        "cpu": {
+            "2048": "genai_config_cpu_2k.json"
+        }
     },
 
     "tests": {
         "PPL": {
+            "eps": ["morphizen", "dml", "cpu"],
             "seq_lengths": [2048],
             "params": {
                 "nsamples": 0.02
             }
         },
         "MMLU": {
+            "eps": ["morphizen", "dml", "cpu"],
             "seq_lengths": [2048],
             "params": {}
         },
         "RUNMODEL": {
+            "eps": ["morphizen"],
             "seq_lengths": [2048],
             "params": {
                 "prompt_file": "prompts.json",
