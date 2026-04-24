@@ -30,27 +30,17 @@ from transformers import (
     AutoTokenizer,
 )
 
-def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30):
-    # OGA fixed-shape models hardcode their input window and total token
-    # budget in the model's own genai_config.json (which lives alongside
-    # model.onnx and *is* the model's metadata — model.onnx itself is
-    # symbolic-shape). Read both upfront so get_logits() can pick the
-    # right truncation length and the right max_length.
+def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30,
+         max_input_len_override=None, context_length_override=None):
     max_input_len = 4096            # pytorch fallback
     max_length = None               # OGA-only; required if framework=='oga'
     if framework == "oga":
-        with open(os.path.join(model, "genai_config.json"),
-                  "r", encoding="utf-8") as _f:
-            _mcfg = json.load(_f)["model"]
-        _dec = _mcfg.get("decoder", {})
-        max_input_len = int(
-            _dec.get("fixed_prompt_length")
-            or _dec.get("sliding_window", {}).get("window_size")
-            or _mcfg["context_length"]
-        )
-        max_length = int(_mcfg["context_length"])
+        if max_input_len_override is not None:
+            max_input_len = max_input_len_override
+        if context_length_override is not None:
+            max_length = context_length_override
         print(f"  [MMLU] max_input_len={max_input_len}, "
-              f"max_length={max_length} (from genai_config.json)")
+              f"max_length={max_length}")
 
 
     # set dataset path

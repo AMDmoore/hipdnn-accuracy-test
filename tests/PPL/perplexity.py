@@ -67,11 +67,11 @@ def main(args):
     params = og.GeneratorParams(model)
     search_options = {name:getattr(args, name) for name in ['do_sample', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
-    if hasattr(args, 'max_length'):
-        seqlen = args.max_length
-    else:
-        seqlen = args.context_length
-    search_options['max_length'] = args.context_length
+    if not hasattr(args, 'max_length'):
+        raise ValueError("-l (seqlen / fixed_prompt_length) is required for PPL")
+    seqlen = args.max_length
+    if hasattr(args, 'context_length') and args.context_length is not None:
+        search_options['max_length'] = args.context_length
     params.set_search_options(**search_options)
     if hasattr(params, 'try_graph_capture_with_max_batch_size'):
         params.try_graph_capture_with_max_batch_size(1)
@@ -124,8 +124,4 @@ if __name__ == "__main__":
     parser.add_argument('-s', "--dataset", required=False, default="raw", choices=["raw", "non-raw"], help="Wikitext2 dataset version (raw or non-raw). Defaults to 'raw'")
     parser.add_argument('-c', '--context-length', type=int, default=None, help='Context length (max_length for OGA). If not set, reads from genai_config.json')
     args = parser.parse_args()
-    if args.context_length is None:
-        with open(os.path.join(args.model, 'genai_config.json')) as f:
-            genai_cfg = json.load(f)
-        args.context_length = genai_cfg["model"]["context_length"]
     main(args)
