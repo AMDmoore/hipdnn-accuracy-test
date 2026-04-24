@@ -14,7 +14,7 @@ from tests.base import BaseTest, TestResult
 class MMLUTest(BaseTest):
     name = "MMLU"
 
-    def execute(self, model_dir: str, seqlen: int,
+    def execute(self, model_dir: str, model_params: dict,
                 test_params: dict) -> TestResult:
         script = os.path.join(os.path.dirname(__file__), "MMLU", "test_oga_mmlu.py")
 

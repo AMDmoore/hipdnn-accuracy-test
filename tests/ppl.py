@@ -15,16 +15,19 @@ from tests.base import BaseTest, TestResult
 class PPLTest(BaseTest):
     name = "PPL"
 
-    def execute(self, model_dir: str, seqlen: int,
+    def execute(self, model_dir: str, model_params: dict,
                 test_params: dict) -> TestResult:
         script = os.path.join(os.path.dirname(__file__), "PPL", "perplexity.py")
 
+        seqlen = model_params["seqlen"]
+        context_length = model_params["context_length"]
         nsamples = test_params.get("nsamples", 1.0)
 
         cmd = [
             sys.executable, script,
             "-m", model_dir,
             "-l", str(seqlen),
+            "-c", str(context_length),
             "-n", str(nsamples),
             "-v",
             "-s", "non-raw",

@@ -75,9 +75,15 @@ def generate_text(model, tokenizer, prompts, model_type, args):
     for i, prompt in enumerate(prompts):
         start_time = time.time()
         generator=og.Generator(model, params)
-        generator.append_tokens(tokenizer.encode(prompt))
+        prompt_tokens = tokenizer.encode(prompt)
+        prompt_len = len(prompt_tokens)
+        generator.append_tokens(prompt_tokens)
+        new_tokens = 0
         while not generator.is_done():
             generator.generate_next_token()
+            new_tokens += 1
+            if args.max_new_tokens is not None and new_tokens >= args.max_new_tokens:
+                break
         output_tokens = generator.get_sequence(0)
         elapsed_time = time.time() - start_time
 
@@ -119,6 +125,8 @@ def main():
     # Generation parameters
     parser.add_argument("-l", "--max_length", type=int,
                         help="Max tokens to generate including the prompt")
+    parser.add_argument("--max-new-tokens", type=int, default=None,
+                        help="Max NEW tokens to generate (excludes prompt). Overrides max_length stop.")
     parser.add_argument("-i", "--min_length", type=int,
                         help="Min tokens to generate including the prompt")
     parser.add_argument("-ds", "--do_random_sampling", default=False,

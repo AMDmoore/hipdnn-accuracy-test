@@ -85,26 +85,33 @@ def setup_package_env(package_dir: str, therock_dist: str = None):
             print(f"  THEROCK   : {therock_dist}")
 
 
-def extract_seqlen(genai_config_path: str) -> int:
-    """Extract the fixed sequence length from a genai_config.json.
+def extract_model_params(genai_config_path: str) -> dict:
+    """Extract key model parameters from a genai_config.json.
 
-    Checks model.decoder.fixed_prompt_length first, then
-    model.decoder.sliding_window.window_size.
-    Raises ValueError if neither is found.
+    Returns dict with:
+        seqlen          — fixed_prompt_length or sliding_window.window_size
+        context_length  — model.context_length
     """
     with open(genai_config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    decoder = config.get("model", {}).get("decoder", {})
+    model = config.get("model", {})
+    decoder = model.get("decoder", {})
 
+    seqlen = None
     if "fixed_prompt_length" in decoder:
-        return int(decoder["fixed_prompt_length"])
+        seqlen = int(decoder["fixed_prompt_length"])
+    else:
+        sliding_window = decoder.get("sliding_window", {})
+        if "window_size" in sliding_window:
+            seqlen = int(sliding_window["window_size"])
 
-    sliding_window = decoder.get("sliding_window", {})
-    if "window_size" in sliding_window:
-        return int(sliding_window["window_size"])
+    if seqlen is None:
+        raise ValueError(
+            f"Cannot extract seqlen from {genai_config_path}: "
+            "neither 'fixed_prompt_length' nor 'sliding_window.window_size' found"
+        )
 
-    raise ValueError(
-        f"Cannot extract seqlen from {genai_config_path}: "
-        "neither 'fixed_prompt_length' nor 'sliding_window.window_size' found"
-    )
+    context_length = int(model.get("context_length", seqlen))
+
+    return {"seqlen": seqlen, "context_length": context_length}

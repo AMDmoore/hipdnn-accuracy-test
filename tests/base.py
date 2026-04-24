@@ -5,7 +5,7 @@ import subprocess
 import sys
 from abc import ABC, abstractmethod
 
-from config import extract_seqlen
+from config import extract_model_params
 
 
 class TestResult:
@@ -42,17 +42,18 @@ class BaseTest(ABC):
             )
 
         try:
-            seqlen = extract_seqlen(genai_config_path)
+            model_params = extract_model_params(genai_config_path)
         except ValueError as e:
             return TestResult(
                 success=False, metrics={}, stdout="", stderr="",
                 error_msg=str(e),
             )
 
-        print(f"  [{self.name}] seqlen={seqlen}, model_dir={model_dir}")
+        print(f"  [{self.name}] seqlen={model_params['seqlen']}, "
+              f"context_length={model_params['context_length']}, model_dir={model_dir}")
 
         try:
-            result = self.execute(model_dir, seqlen, test_params)
+            result = self.execute(model_dir, model_params, test_params)
         except Exception as e:
             return TestResult(
                 success=False, metrics={}, stdout="", stderr="",
@@ -62,9 +63,13 @@ class BaseTest(ABC):
         return result
 
     @abstractmethod
-    def execute(self, model_dir: str, seqlen: int,
+    def execute(self, model_dir: str, model_params: dict,
                 test_params: dict) -> TestResult:
-        """Subclass implements: build command line, run subprocess, parse."""
+        """Subclass implements: build command line, run subprocess, parse.
+
+        model_params keys: seqlen, context_length (from genai_config.json)
+        test_params keys: test-specific (from test_config.json tests.<name>.params)
+        """
         ...
 
     _EP_BOOTSTRAP = os.path.join(os.path.dirname(__file__), "_ep_bootstrap.py")

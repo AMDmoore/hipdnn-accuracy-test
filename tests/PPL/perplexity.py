@@ -67,18 +67,11 @@ def main(args):
     params = og.GeneratorParams(model)
     search_options = {name:getattr(args, name) for name in ['do_sample', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
-    # seqlen = chunk size for perplexity computation (= fixed_prompt_length).
-    # max_length must match context_length so OGA allocates the right
-    # attention_mask / KV cache shape for fixed-shape models.
-    with open(os.path.join(args.model, 'genai_config.json')) as f:
-        genai_cfg = json.load(f)
-    context_length = genai_cfg["model"]["context_length"]
-
     if hasattr(args, 'max_length'):
         seqlen = args.max_length
     else:
-        seqlen = context_length
-    search_options['max_length'] = context_length
+        seqlen = args.context_length
+    search_options['max_length'] = args.context_length
     params.set_search_options(**search_options)
     if hasattr(params, 'try_graph_capture_with_max_batch_size'):
         params.try_graph_capture_with_max_batch_size(1)
@@ -129,5 +122,10 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--nsamples', type=float, default = 1.0, help='Number of samples of wikitext2 to use in computing the perplexity')
     parser.add_argument('-d', "--device", required=False, default="cpu", choices=["cpu", "aie"], help="Target device (CPU or Ryzen-AI)")
     parser.add_argument('-s', "--dataset", required=False, default="raw", choices=["raw", "non-raw"], help="Wikitext2 dataset version (raw or non-raw). Defaults to 'raw'")
+    parser.add_argument('-c', '--context-length', type=int, default=None, help='Context length (max_length for OGA). If not set, reads from genai_config.json')
     args = parser.parse_args()
+    if args.context_length is None:
+        with open(os.path.join(args.model, 'genai_config.json')) as f:
+            genai_cfg = json.load(f)
+        args.context_length = genai_cfg["model"]["context_length"]
     main(args)
