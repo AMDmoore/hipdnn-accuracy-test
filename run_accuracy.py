@@ -14,7 +14,7 @@ import shutil
 import sys
 from datetime import datetime
 
-from config import load_test_config, extract_seqlen, setup_package_env
+from config import load_test_config, setup_package_env
 from results.reporter import ResultCollector
 from tests.ppl import PPLTest
 from tests.mmlu import MMLUTest

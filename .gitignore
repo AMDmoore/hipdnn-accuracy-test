@@ -12,6 +12,9 @@ results/*/
 # MMLU auxiliary training data (contains files >100MB)
 tests/MMLU/mmlu_data/auxiliary_train/
 
+# MMLU eval outputs
+tests/MMLU/outs/
+
 # Editor
 .vscode/
 .idea/

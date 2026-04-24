@@ -14,13 +14,18 @@ from tests.base import BaseTest, TestResult
 class MMLUTest(BaseTest):
     name = "MMLU"
 
-    def execute(self, model_dir: str, seqlen: int,
+    def execute(self, model_dir: str, model_params: dict,
                 test_params: dict) -> TestResult:
         script = os.path.join(os.path.dirname(__file__), "MMLU", "test_oga_mmlu.py")
+
+        seqlen = model_params["seqlen"]
+        context_length = model_params["context_length"]
 
         cmd = [
             sys.executable, script,
             "-m", model_dir,
+            "-l", str(seqlen),
+            "-c", str(context_length),
         ]
 
         mmlu_dir = os.path.join(os.path.dirname(__file__), "MMLU")

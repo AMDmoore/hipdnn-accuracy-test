@@ -14,7 +14,7 @@ from tests.base import BaseTest, TestResult
 class TINYGSM8KTest(BaseTest):
     name = "TINYGSM8K"
 
-    def execute(self, model_dir: str, seqlen: int,
+    def execute(self, model_dir: str, model_params: dict,
                 test_params: dict) -> TestResult:
         return TestResult(
             success=False,
