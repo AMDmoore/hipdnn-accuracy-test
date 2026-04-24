@@ -41,6 +41,50 @@ def load_test_config(config_path: str) -> dict:
     return config
 
 
+def setup_package_env(package_dir: str, therock_dist: str = None):
+    """Configure PATH and env vars from a deployment package directory.
+
+    Expected layout:
+        package_dir/
+            bin/   — DLLs and executables (onnxruntime.dll, onnxruntime-genai.dll,
+                     onnxruntime_morphizen_ep.dll, model_benchmark.exe, etc.)
+            lib/   — HIP custom kernels and import libraries
+
+    Sets:
+        PATH                — prepends bin/ so DLLs are found at runtime
+        HIP_CUSTOM_KERNELS_DIR — points to lib/ for HIP kernel loading
+        THEROCK_DIST        — TheRock SDK path (if provided)
+    """
+    package_dir = os.path.abspath(package_dir)
+    bin_dir = os.path.join(package_dir, "bin")
+    lib_dir = os.path.join(package_dir, "lib")
+
+    if not os.path.isdir(bin_dir):
+        raise FileNotFoundError(f"package bin/ not found: {bin_dir}")
+    if not os.path.isdir(lib_dir):
+        raise FileNotFoundError(f"package lib/ not found: {lib_dir}")
+
+    os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+    os.environ["HIP_CUSTOM_KERNELS_DIR"] = lib_dir
+
+    print(f"Package env : {package_dir}")
+    print(f"  bin (PATH): {bin_dir}")
+    print(f"  lib (HIP) : {lib_dir}")
+
+    if therock_dist:
+        therock_dist = os.path.abspath(therock_dist)
+        if not os.path.isdir(therock_dist):
+            raise FileNotFoundError(f"therock_dist not found: {therock_dist}")
+        os.environ["THEROCK_DIST"] = therock_dist
+        therock_bin = os.path.join(therock_dist, "bin")
+        if os.path.isdir(therock_bin):
+            os.environ["PATH"] = therock_bin + os.pathsep + os.environ.get("PATH", "")
+            print(f"  THEROCK   : {therock_dist}")
+            print(f"  THEROCK/bin: {therock_bin} (added to PATH)")
+        else:
+            print(f"  THEROCK   : {therock_dist}")
+
+
 def extract_seqlen(genai_config_path: str) -> int:
     """Extract the fixed sequence length from a genai_config.json.
 

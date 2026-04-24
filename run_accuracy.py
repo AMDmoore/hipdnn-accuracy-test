@@ -14,7 +14,7 @@ import shutil
 import sys
 from datetime import datetime
 
-from config import load_test_config, extract_seqlen
+from config import load_test_config, extract_seqlen, setup_package_env
 from results.reporter import ResultCollector
 from tests.ppl import PPLTest
 from tests.mmlu import MMLUTest
@@ -46,6 +46,11 @@ def main():
         help="Path to test_config.json (default: test_config.json)",
     )
     parser.add_argument(
+        "--package-dir", type=str, default=None,
+        help="Path to deployment package (bin/ + lib/). "
+             "Overrides package_dir from config.",
+    )
+    parser.add_argument(
         "--model-dir", type=str, default=None,
         help="Override model_dir from config",
     )
@@ -65,6 +70,12 @@ def main():
     args = parser.parse_args()
 
     config = load_test_config(args.config)
+
+    package_dir = args.package_dir or config.get("package_dir")
+    therock_dist = config.get("therock_dist")
+    if package_dir:
+        setup_package_env(package_dir, therock_dist=therock_dist)
+    print()
 
     model_dir = args.model_dir or config["model_dir"]
     genai_configs = config["genai_configs"]

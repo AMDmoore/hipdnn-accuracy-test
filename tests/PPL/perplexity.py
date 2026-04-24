@@ -41,9 +41,23 @@ def get_wikitext2(tokenizer, dataset="non-raw"):
     #     dataloader.append((inp, tar))
     return dataloader, testenc
 
+def _register_plugin_eps():
+    """Register plugin EP libraries found on PATH (e.g. MorphiZenEP)."""
+    ep_dlls = {"MorphiZenEP": "onnxruntime_morphizen_ep.dll"}
+    if not hasattr(og, "register_execution_provider_library"):
+        return
+    for ep_name, dll_name in ep_dlls.items():
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            candidate = os.path.join(d, dll_name)
+            if os.path.isfile(candidate):
+                og.register_execution_provider_library(ep_name, candidate)
+                print(f"Registered plugin EP: {ep_name} -> {candidate}")
+                break
+
 def main(args):
     # Compute perplexity using the sum of decomposed log-likelihoods of disjoint chunks of the dataset
     print(f"Calculating Perplexity on wikitext2 test set ...")
+    _register_plugin_eps()
     if args.verbose: print("Loading model...")
     model = og.Model(f'{args.model}')
     if args.verbose: print("Model loaded")
@@ -64,17 +78,21 @@ def main(args):
     params = og.GeneratorParams(model)
     search_options = {name:getattr(args, name) for name in ['do_sample', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
-    # seqlen = chunk size for perplexity computation.
-    # When -l is provided, use it as seqlen (and set max_length = seqlen).
-    # Otherwise fall back to context_length from genai_config.json.
+    # seqlen = chunk size for perplexity computation (= fixed_prompt_length).
+    # max_length must match context_length so OGA allocates the right
+    # attention_mask / KV cache shape for fixed-shape models.
+    with open(os.path.join(args.model, 'genai_config.json')) as f:
+        genai_cfg = json.load(f)
+    context_length = genai_cfg["model"]["context_length"]
+
     if hasattr(args, 'max_length'):
         seqlen = args.max_length
     else:
-        with open(os.path.join(args.model, 'genai_config.json')) as f:
-            seqlen = json.load(f)["model"]["context_length"]
-    search_options['max_length'] = seqlen
+        seqlen = context_length
+    search_options['max_length'] = context_length
     params.set_search_options(**search_options)
-    params.try_graph_capture_with_max_batch_size(1)
+    if hasattr(params, 'try_graph_capture_with_max_batch_size'):
+        params.try_graph_capture_with_max_batch_size(1)
     if args.verbose: print("GeneratorParams created")
 
     # the dataset is partitioned into nsamples sequences of length seqlen
@@ -92,20 +110,20 @@ def main(args):
     # iterate over the nsamples sequences
     with torch.no_grad():
         for i in range(nsamples):
-            # generate output for the first seq_len-1 tokens as input
-            input_tokens = test_enc[(i * seqlen) : ((i + 1) * seqlen - 1)] 
+            input_tokens = test_enc[(i * seqlen) : ((i + 1) * seqlen)]
             generator = og.Generator(model, params)
             generator.append_tokens(input_tokens)
-            # shift the tokens by one to match the output logit values with the actual next token
-            shift_labels = test_enc[(i * seqlen) : ((i + 1) * seqlen - 1)][1:]
-            # use cross entropy loss function to find the negative log likelihood of every prediction
+            logits = torch.tensor(generator.get_output("logits")[0], dtype=torch.float32)
+            # standard shift: logits[:-1] predicts tokens[1:]
+            shift_logits = logits[:-1]
+            shift_labels = torch.tensor(test_enc[(i * seqlen) + 1 : ((i + 1) * seqlen)], dtype=torch.long)
             loss_fct = torch.nn.CrossEntropyLoss()
-            loss = loss_fct(torch.tensor(generator.get_output("logits")[0][:-1], dtype=torch.float32), shift_labels)
-            neg_log_likelihood = loss.float() * (seqlen - 2)
+            loss = loss_fct(shift_logits, shift_labels)
+            neg_log_likelihood = loss.float() * (seqlen - 1)
             nlls.append(neg_log_likelihood)
+            del generator
             print(f"Iteration {i+1} / {nsamples} done", end ='\r')
-        # compute the perplexity for the nsamples * (seqlen-2) generate tokens
-        ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * (seqlen-2)))
+        ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * (seqlen - 1)))
         print("Perplexity:", ppl.item())
 
 if __name__ == "__main__":
