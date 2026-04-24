@@ -41,23 +41,12 @@ def get_wikitext2(tokenizer, dataset="non-raw"):
     #     dataloader.append((inp, tar))
     return dataloader, testenc
 
-def _register_plugin_eps():
-    """Register plugin EP libraries found on PATH (e.g. MorphiZenEP)."""
-    ep_dlls = {"MorphiZenEP": "onnxruntime_morphizen_ep.dll"}
-    if not hasattr(og, "register_execution_provider_library"):
-        return
-    for ep_name, dll_name in ep_dlls.items():
-        for d in os.environ.get("PATH", "").split(os.pathsep):
-            candidate = os.path.join(d, dll_name)
-            if os.path.isfile(candidate):
-                og.register_execution_provider_library(ep_name, candidate)
-                print(f"Registered plugin EP: {ep_name} -> {candidate}")
-                break
-
 def main(args):
     # Compute perplexity using the sum of decomposed log-likelihoods of disjoint chunks of the dataset
+    # Plugin EP registration (MorphiZenEP, etc.) is handled centrally by
+    # tests/_ep_bootstrap.py, which the orchestrator injects in front of
+    # this script's invocation.
     print(f"Calculating Perplexity on wikitext2 test set ...")
-    _register_plugin_eps()
     if args.verbose: print("Loading model...")
     model = og.Model(f'{args.model}')
     if args.verbose: print("Model loaded")

@@ -67,12 +67,24 @@ class BaseTest(ABC):
         """Subclass implements: build command line, run subprocess, parse."""
         ...
 
+    _EP_BOOTSTRAP = os.path.join(os.path.dirname(__file__), "_ep_bootstrap.py")
+
     def run_subprocess(self, cmd: list, cwd: str = None,
                        timeout: int = 3600) -> tuple:
         """Run a command as subprocess and capture output.
 
+        Transparently injects ``tests/_ep_bootstrap.py`` in front of any
+        ``python <target.py> ...`` invocation so plugin execution providers
+        (e.g. MorphiZenEP) get registered exactly once, in one place,
+        before the target script runs.
+
         Returns (returncode, stdout, stderr).
         """
+        if (len(cmd) >= 2 and isinstance(cmd[1], str)
+                and cmd[1].endswith(".py")
+                and os.path.isfile(self._EP_BOOTSTRAP)):
+            cmd = [cmd[0], self._EP_BOOTSTRAP] + list(cmd[1:])
+
         print(f"  [{self.name}] Running: {' '.join(cmd)}")
         try:
             proc = subprocess.run(
