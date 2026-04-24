@@ -7,7 +7,6 @@ import torch
 from colorama import Fore
 import argparse
 
-# For OGA
 
 print(Fore.GREEN+"Computing MMLU..."+Fore.RESET)
 

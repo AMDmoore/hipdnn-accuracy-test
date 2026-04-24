@@ -31,6 +31,27 @@ from transformers import (
 )
 
 def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30):
+    # OGA fixed-shape models hardcode their input window and total token
+    # budget in the model's own genai_config.json (which lives alongside
+    # model.onnx and *is* the model's metadata — model.onnx itself is
+    # symbolic-shape). Read both upfront so get_logits() can pick the
+    # right truncation length and the right max_length.
+    max_input_len = 4096            # pytorch fallback
+    max_length = None               # OGA-only; required if framework=='oga'
+    if framework == "oga":
+        with open(os.path.join(model, "genai_config.json"),
+                  "r", encoding="utf-8") as _f:
+            _mcfg = json.load(_f)["model"]
+        _dec = _mcfg.get("decoder", {})
+        max_input_len = int(
+            _dec.get("fixed_prompt_length")
+            or _dec.get("sliding_window", {}).get("window_size")
+            or _mcfg["context_length"]
+        )
+        max_length = int(_mcfg["context_length"])
+        print(f"  [MMLU] max_input_len={max_input_len}, "
+              f"max_length={max_length} (from genai_config.json)")
+
 
     # set dataset path
     # if not (os.path.exists("./mmlu_data")):
@@ -183,18 +204,27 @@ def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30):
     ):
         input_ids = tokenizer(inputs, padding="longest")["input_ids"]
         input_ids = torch.tensor(input_ids, device=device)
-        max_seq_len = 4096
 
-        if input_ids.shape[1] > max_seq_len:
-            input_ids = input_ids[:, input_ids.shape[1] - max_seq_len + 1 :]
+        if input_ids.shape[1] > max_input_len:
+            input_ids = input_ids[:, input_ids.shape[1] - max_input_len + 1 :]
         tokens = {"input_ids": input_ids}
         if framework == "oga":
             params = og.GeneratorParams(model)
-            params.set_search_options(max_length=2048)
+            if max_length is None:
+                raise ValueError(
+                    "mmlu(framework='oga') requires max_length "
+                    "(typically context_length from genai_config.json)"
+                )
+            params.set_search_options(max_length=max_length)
             generator = og.Generator(model, params)
             generator.append_tokens(input_ids)
             outputs = generator.get_output("logits")
-            logits = torch.tensor(outputs)[:, -1, :]
+            # Model uses fixed_prompt_length, so the logits tensor is padded to
+            # that length. We must read at the last *real* input position
+            # (input_ids is left-aligned with right padding); reading [:, -1, :]
+            # would return logits at a padding position and yield garbage.
+            last_real_pos = input_ids.shape[1] - 1
+            logits = torch.tensor(outputs)[:, last_real_pos, :]
         else:
             attention_mask = input_ids.ne(tokenizer.pad_token_id)
             outputs = model(input_ids, attention_mask=attention_mask)["logits"]
