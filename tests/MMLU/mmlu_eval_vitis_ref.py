@@ -67,7 +67,7 @@ def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30,
         model_name = model.model_name
         tokenizer = model.tokenizer
         device = model.device    
-    if device=="ryzenai":
+    if device=="ryzenai" or device=="directml":
         device = "cpu"
     print("Model: ", model_name)
     if tokenizer.pad_token is None:
