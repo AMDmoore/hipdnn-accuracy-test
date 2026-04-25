@@ -26,6 +26,12 @@
                 "prompt_file": "tests/RUNMODEL/prompts/prompt_2k.txt",
                 "max_new_tokens": 128
             }
+        },
+        "TINYGSM8K": {
+            "seq_lengths": [2048],
+            "params": {
+                "case": "psu_prompt_eos_stop"
+            }
         }
     }
 }
