@@ -121,6 +121,7 @@ def main():
 
             switch_genai_config(model_dir, config_file)
 
+            test_params["output_dir"] = output_dir
             result = test_instance.run(model_dir, test_params)
 
             collector.record(

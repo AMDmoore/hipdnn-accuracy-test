@@ -26,6 +26,7 @@ class RUNMODELTest(BaseTest):
             prompt_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), prompt_file)
 
         max_new_tokens = test_params.get("max_new_tokens", 128)
+        output_dir = test_params.get("output_dir", model_dir)
 
         cmd = [
             sys.executable, script,
@@ -37,7 +38,7 @@ class RUNMODELTest(BaseTest):
         if prompt_file:
             cmd.extend(["-pr", prompt_file])
 
-        output_json = os.path.join(model_dir, "runmodel_output.json")
+        output_json = os.path.join(output_dir, "runmodel_output.json")
         cmd.extend(["-o", output_json])
 
         runmodel_dir = os.path.join(os.path.dirname(__file__), "RUNMODEL")
