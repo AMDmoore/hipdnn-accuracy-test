@@ -2,6 +2,7 @@
     "model_dir": "D:/Users/shoucair/hipdnn/oga/Llama-3.1-8B",
     "package_dir": "D:/Users/shoucair/package_gfx1151_therock7.11",
     "therock_dist": "C:/workspace/therock",
+    "output_dir": "results",
 
     "genai_configs": {
         "1024": "genai_config_p1024m4096.json",

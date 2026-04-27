@@ -65,7 +65,8 @@ def main():
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
-        help="Output directory for results (default: results/<timestamp>)",
+        help="Exact output directory for this run's results. Overrides "
+             "the per-run subfolder derived from config['output_dir'].",
     )
     args = parser.parse_args()
 
@@ -89,7 +90,11 @@ def main():
 
     model_name = os.path.basename(os.path.normpath(model_dir))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = args.output_dir or os.path.join("results", f"{model_name}_{timestamp}")
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        base_output_dir = config.get("output_dir", "results")
+        output_dir = os.path.join(base_output_dir, f"{model_name}_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
     collector = ResultCollector(output_dir, model_name)
