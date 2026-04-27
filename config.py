@@ -16,6 +16,11 @@ def load_test_config(config_path: str) -> dict:
     if "tests" not in config:
         raise ValueError("test_config.json must contain 'tests'")
 
+    # Base directory for results; per-run output is placed in
+    # <output_dir>/<model_name>_<timestamp>/. Resolved relative to the
+    # current working directory if not absolute.
+    config.setdefault("output_dir", "results")
+
     model_dir = config["model_dir"]
     if not os.path.isdir(model_dir):
         raise FileNotFoundError(f"model_dir does not exist: {model_dir}")

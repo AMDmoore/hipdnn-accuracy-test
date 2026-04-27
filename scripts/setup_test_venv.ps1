@@ -69,6 +69,13 @@
     Tests to run, forwarded to `run_accuracy.py --tests`. If omitted,
     runs every test listed in test_config.json.
 
+.PARAMETER OutputDir
+    Optional. Base directory for results. If omitted, falls back to the
+    'output_dir' field in test_config.json (default 'results'). The
+    actual run goes into <OutputDir>\<ModelName>_<Timestamp>\, and all
+    setup, smoke-test, and accuracy-run output is teed to
+    <run_dir>\setup.log via Start-Transcript.
+
 .PARAMETER Python
     Python launcher to bootstrap the venv. Must resolve to a 3.14 build
     matching the cp314 OGA .pyd ABI. Default: 'py -3.14'.
@@ -112,6 +119,8 @@ param(
 
     [string[]]$Tests,
 
+    [string]$OutputDir,
+
     [string]$Python      = "py -3.14",
 
     [switch]$Force
@@ -149,6 +158,37 @@ if (-not (Test-Path -LiteralPath $testConfig)) {
     Fail "test_config.json not found at expected location: $testConfig"
 }
 Info "test_config.json: $testConfig"
+
+# ------------------------------------------------------------------ resolve run output dir
+# Compute the per-run output dir up front so we can tee setup logs into
+# it from the very first phase. Precedence:
+#   1. -OutputDir parameter
+#   2. 'output_dir' field in test_config.json
+#   3. literal 'results'
+# Relative paths are resolved against the repo root.
+if ($OutputDir) {
+    $baseOutDir = $OutputDir
+} else {
+    $cfgPeek = Get-Content -LiteralPath $testConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (($cfgPeek.PSObject.Properties.Name -contains 'output_dir') -and $cfgPeek.output_dir) {
+        $baseOutDir = [string]$cfgPeek.output_dir
+    } else {
+        $baseOutDir = 'results'
+    }
+}
+if (-not [System.IO.Path]::IsPathRooted($baseOutDir)) {
+    $baseOutDir = Join-Path $repoRoot $baseOutDir
+}
+$modelName = Split-Path -Leaf ($ModelDir.TrimEnd('\','/'))
+$stamp     = Get-Date -Format 'yyyyMMdd_HHmmss'
+$runOutDir = Join-Path $baseOutDir "${modelName}_${stamp}"
+New-Item -ItemType Directory -Force -Path $runOutDir | Out-Null
+
+$setupLog = Join-Path $runOutDir 'setup.log'
+Start-Transcript -Path $setupLog -Force | Out-Null
+Step "Run output dir: $runOutDir"
+Info "base output dir : $baseOutDir"
+Info "setup.log       : $setupLog"
 
 $venvPy = Join-Path $VenvPath 'Scripts\python.exe'
 
@@ -296,11 +336,13 @@ function Set-JsonStringField {
 $mdJson = $ModelDir.Replace('\', '/')
 $pdJson = $PackageDir.Replace('\', '/')
 $tdJson = $TherockDist.Replace('\', '/')
+$odJson = $baseOutDir.Replace('\', '/')
 
 $cfg = Get-Content -LiteralPath $testConfig -Raw -Encoding UTF8
 $cfg = Set-JsonStringField -Text $cfg -Key 'model_dir'    -Value $mdJson
 $cfg = Set-JsonStringField -Text $cfg -Key 'package_dir'  -Value $pdJson
 $cfg = Set-JsonStringField -Text $cfg -Key 'therock_dist' -Value $tdJson
+$cfg = Set-JsonStringField -Text $cfg -Key 'output_dir'   -Value $odJson
 
 # Sanity-check it still parses, before we overwrite the file.
 try {
@@ -313,6 +355,7 @@ Set-Content -LiteralPath $testConfig -Value $cfg -Encoding UTF8 -NoNewline
 Info "model_dir    = $mdJson"
 Info "package_dir  = $pdJson"
 Info "therock_dist = $tdJson"
+Info "output_dir   = $odJson"
 
 # ------------------------------------------------------------------ smoke test
 Step "Smoke-testing OGA import + EP DLL discovery"
@@ -350,13 +393,15 @@ try {
 }
 
 # ------------------------------------------------------------------ run the test
-$runArgs = @('run_accuracy.py')
+# Pin run_accuracy.py to the per-run directory we created above (and have
+# been teeing setup.log into) so all artifacts end up colocated.
+$runArgs = @('run_accuracy.py', '--output-dir', $runOutDir)
 if ($Tests -and $Tests.Count -gt 0) {
     $runArgs += '--tests'
     $runArgs += $Tests
     Step "Running: python $($runArgs -join ' ')   (cwd=$repoRoot)"
 } else {
-    Step "Running: python run_accuracy.py   (all tests in test_config.json, cwd=$repoRoot)"
+    Step "Running: python run_accuracy.py --output-dir $runOutDir   (all tests in test_config.json, cwd=$repoRoot)"
 }
 
 Push-Location -LiteralPath $repoRoot
@@ -374,6 +419,8 @@ if ($rc -eq 0) {
     Write-Host "Test run exit code: $rc" -ForegroundColor Red
 }
 Write-Host ""
+Write-Host "Run artifacts: $runOutDir" -ForegroundColor Yellow
+Write-Host ""
 Write-Host "Re-run anytime with the same command (venv is reused unless -Force):" -ForegroundColor Yellow
 Write-Host "  .\scripts\setup_test_venv.ps1 -VenvPath $VenvPath -OgaRuntime $OgaRuntime ``"
 Write-Host "      -PackageDir $PackageDir -TherockDist $TherockDist ``"
@@ -382,5 +429,7 @@ Write-Host ""
 Write-Host "Or skip the bootstrapper entirely once the venv is set up:" -ForegroundColor Yellow
 Write-Host "  cd $repoRoot"
 Write-Host "  & '$venvPy' run_accuracy.py --tests <NAME>"
+
+Stop-Transcript | Out-Null
 
 exit $rc
