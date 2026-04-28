@@ -95,6 +95,7 @@ def main():
     else:
         base_output_dir = config.get("output_dir", "results")
         output_dir = os.path.join(base_output_dir, f"{model_name}_{timestamp}")
+    output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     collector = ResultCollector(output_dir, model_name)
