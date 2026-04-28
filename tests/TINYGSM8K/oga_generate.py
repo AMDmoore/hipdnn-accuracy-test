@@ -51,6 +51,7 @@ def generate(model_dir, inputs, output_file, context_length=None,
     outputs = []
     correct_format = 0
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as f:
         for i in tqdm(range(len(inputs)), desc="Generating"):
             if case == "default":
