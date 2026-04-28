@@ -37,7 +37,12 @@ def generate(model_dir, inputs, output_file, context_length=None,
              verbose=False):
     with open(os.path.join(model_dir, "genai_config.json"), "r") as f:
         config = json.load(f)
-    eos_token_id = config["model"]["eos_token_id"]
+    raw_eos = config["model"]["eos_token_id"]
+    eos_token_ids = (
+        {int(t) for t in raw_eos}
+        if isinstance(raw_eos, (list, tuple))
+        else {int(raw_eos)}
+    )
     if context_length is None:
         context_length = config["model"]["context_length"]
 
@@ -72,8 +77,8 @@ def generate(model_dir, inputs, output_file, context_length=None,
             num_tokens = 0
             while not generator.is_done():
                 generator.generate_next_token()
-                new_token = generator.get_next_tokens()[0]
-                if case == "psu_prompt_eos_stop" and new_token == eos_token_id:
+                new_token = int(generator.get_next_tokens()[0])
+                if case == "psu_prompt_eos_stop" and new_token in eos_token_ids:
                     break
                 response += tokenizer_stream.decode(new_token)
                 num_tokens += 1
