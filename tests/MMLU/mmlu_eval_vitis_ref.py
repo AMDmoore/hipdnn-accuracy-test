@@ -67,7 +67,14 @@ def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30,
         model_name = model.model_name
         tokenizer = model.tokenizer
         device = model.device    
-    if device=="ryzenai" or device=="directml":
+    # OGA reports device_type as the EP name (e.g. "ryzenai", "directml",
+    # "morphizenep", ...). Inference runs entirely inside OGA on that EP; the
+    # only PyTorch tensors created in this file are tiny CPU-side helpers
+    # (choice-token IDs, softmax over 4 logits). Map any non-PyTorch backend
+    # name to "cpu" so torch.tensor(...).to(device) doesn't raise
+    # "Expected one of cpu, cuda, hip, ..." for plugin EPs.
+    _TORCH_DEVICES = {"cpu", "cuda", "hip", "xpu", "mps", "privateuseone"}
+    if device not in _TORCH_DEVICES:
         device = "cpu"
     print("Model: ", model_name)
     if tokenizer.pad_token is None:
