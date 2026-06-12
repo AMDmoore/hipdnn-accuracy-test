@@ -1,8 +1,8 @@
 """RUNMODEL test wrapper.
 
-Calls tests/RUNMODEL/run_model.py as a subprocess.
-For fixed-shape models, -l (max_length) must equal context_length from
-genai_config.json so OGA allocates the correct attention_mask size.
+Calls tests/RUNMODEL/run_model.py as a subprocess. -l (OGA max_length, which
+includes the prompt) comes from the per-run seq_len; it must be large enough
+to cover prompt_len + max_new_tokens.
 """
 
 import json
@@ -19,8 +19,17 @@ class RUNMODELTest(BaseTest):
                 test_params: dict) -> TestResult:
         script = os.path.join(os.path.dirname(__file__), "RUNMODEL", "run_model.py")
 
-        context_length = model_params["context_length"]
-        max_length = context_length
+        # Dynamic-shape: -l is the OGA max_length / KV cap (includes the prompt),
+        # so it takes the context_length field. It must be >= prompt_len +
+        # max_new_tokens; size seq_lengths accordingly in test_config.json.
+        max_length = test_params.get("context_length")
+        if max_length is None:
+            return TestResult(
+                success=False, metrics={}, stdout="", stderr="",
+                error_msg="RUNMODEL requires context_length (from "
+                          "test_config.json 'seq_lengths')",
+            )
+        max_length = int(max_length)
         prompt_file = test_params.get("prompt_file", "")
         if prompt_file and not os.path.isabs(prompt_file):
             prompt_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), prompt_file)
@@ -46,7 +55,7 @@ class RUNMODELTest(BaseTest):
 
         metrics = {}
         if rc == 0:
-            metrics["context_length"] = context_length
+            metrics["max_length"] = max_length
 
             if os.path.isfile(output_json):
                 try:

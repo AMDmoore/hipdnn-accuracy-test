@@ -18,8 +18,18 @@ class MMLUTest(BaseTest):
                 test_params: dict) -> TestResult:
         script = os.path.join(os.path.dirname(__file__), "MMLU", "test_oga_mmlu.py")
 
-        seqlen = model_params["seqlen"]
-        context_length = model_params["context_length"]
+        # Dynamic-shape: both come from the per-iteration sweep value (same
+        # number, distinct semantics). -l caps the (already short) MMLU input
+        # length; -c is the OGA max_length / KV-cache cap. Passing -c avoids OGA
+        # falling back to the model's architectural context_length (e.g. 131072).
+        seqlen = test_params.get("seq_len")
+        if seqlen is None:
+            return TestResult(
+                success=False, metrics={}, stdout="", stderr="",
+                error_msg="MMLU requires seq_len via test_config.json 'seq_lengths'",
+            )
+        seqlen = int(seqlen)
+        context_length = int(test_params.get("context_length", seqlen))
 
         cmd = [
             sys.executable, script,

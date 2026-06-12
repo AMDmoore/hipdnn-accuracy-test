@@ -24,7 +24,17 @@ class TINYGSM8KTest(BaseTest):
         gen_script = os.path.join(test_dir, "oga_generate.py")
         eval_script = os.path.join(test_dir, "evaluate_gsm8k.py")
 
-        context_length = model_params["context_length"]
+        # Dynamic-shape: -c is the OGA max_length / KV cap, so it takes the
+        # context_length field. Must cover prompt_len + max_new_tokens; size
+        # seq_lengths accordingly in test_config.json.
+        context_length = test_params.get("context_length")
+        if context_length is None:
+            return TestResult(
+                success=False, metrics={}, stdout="", stderr="",
+                error_msg="TINYGSM8K requires context_length (from "
+                          "test_config.json 'seq_lengths')",
+            )
+        context_length = int(context_length)
         output_dir = test_params.get("output_dir", model_dir)
 
         inputs_file = test_params.get("inputs_file",

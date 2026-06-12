@@ -1,13 +1,12 @@
 {
-    "model_dir": "D:/Users/shoucair/hipdnn/oga/Llama-3.1-8B",
+    "model_dir": "D:/Users/shoucair/Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml",
     "package_dir": "D:/Users/shoucair/package_gfx1151_therock7.11",
     "therock_dist": "C:/workspace/therock",
     "output_dir": "results",
 
     "genai_configs": {
-        "1024": "genai_config_p1024m4096.json",
-        "2048": "genai_config_2k.json",
-        "12200": "genai_config_12200.json"
+        "2048": "genai_config.json",
+        "4096": "genai_config.json"
     },
 
     "tests": {
@@ -22,7 +21,7 @@
             "params": {}
         },
         "RUNMODEL": {
-            "seq_lengths": [2048],
+            "seq_lengths": [4096],
             "params": {
                 "prompt_file": "tests/RUNMODEL/prompts/prompt_2k.txt",
                 "max_new_tokens": 128

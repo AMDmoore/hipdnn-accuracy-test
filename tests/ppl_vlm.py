@@ -1,19 +1,11 @@
 """PPL_VLM (VLM Perplexity) test wrapper.
 
-Calls tests/PPL/perplexity_vlm.py as a subprocess. Differs from the LLM
-PPL wrapper in two ways:
+Calls tests/PPL/perplexity_vlm.py as a subprocess. Forwards VLM-specific
+test_params (dataset / split / limit / image_size / max_length / instruction)
+to the runner CLI. VLM PPL does not use ``seq_len`` for chunking: one
+(image, caption) pair per sample, not a fixed-length text chunk.
 
-1. Overrides ``run()`` to skip ``extract_model_params``. VLM models in our
-   zoo (Qwen3.5-9B, Gemma3-4B, etc.) ship pure dynamic-shape genai_configs
-   without ``decoder.fixed_prompt_length`` or ``decoder.sliding_window`` —
-   the LLM helper raises ``ValueError`` on them. VLM PPL also doesn't need
-   a ``seqlen``: chunking is one (image, caption) per sample, not one
-   fixed-length text chunk.
-
-2. Forwards VLM-specific test_params (dataset / split / limit / image_size /
-   max_length / instruction) to the runner CLI.
-
-The ``test_config.json`` repurposes ``seq_lengths`` as a list of provider
+The VLM ``test_config`` repurposes ``seq_lengths`` as a list of provider
 variant names (``allcpu`` / ``allgpu`` / ...). Each entry maps to a
 ``genai_config_<variant>.json`` file via the existing ``genai_configs``
 mapping, so the framework's per-iteration ``switch_genai_config()`` call
@@ -30,35 +22,6 @@ from tests.base import BaseTest, TestResult
 
 class PPLVLMTest(BaseTest):
     name = "PPL_VLM"
-
-    def run(self, model_dir: str, test_params: dict) -> TestResult:
-        """Override: skip extract_model_params; create test output dir; call execute.
-
-        Mirrors BaseTest.run() but does not require fixed_prompt_length /
-        sliding_window in genai_config.json — VLM models are dynamic-shape.
-        """
-        genai_config_path = os.path.join(model_dir, "genai_config.json")
-        if not os.path.isfile(genai_config_path):
-            return TestResult(
-                success=False, metrics={}, stdout="", stderr="",
-                error_msg=f"genai_config.json not found at {genai_config_path}",
-            )
-
-        top_output_dir = test_params.get("output_dir", "results")
-        test_output_dir = os.path.join(top_output_dir, self.name)
-        os.makedirs(test_output_dir, exist_ok=True)
-        test_params["output_dir"] = test_output_dir
-
-        print(f"  [{self.name}] model_dir={model_dir}")
-
-        try:
-            result = self.execute(model_dir, model_params={}, test_params=test_params)
-        except Exception as e:
-            return TestResult(
-                success=False, metrics={}, stdout="", stderr="",
-                error_msg=f"execute() raised: {e}",
-            )
-        return result
 
     def execute(self, model_dir: str, model_params: dict,
                 test_params: dict) -> TestResult:
