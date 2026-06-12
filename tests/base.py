@@ -5,8 +5,6 @@ import subprocess
 import sys
 from abc import ABC, abstractmethod
 
-from config import extract_model_params
-
 
 class TestResult:
     """Container for a single test run result."""
@@ -24,21 +22,26 @@ class BaseTest(ABC):
     """Base class for accuracy test wrappers.
 
     The parent run() method handles:
-      - Reading genai_config.json and extracting seqlen
+      - Verifying genai_config.json exists in the model dir
+      - Creating the per-test output sub-directory
       - Calling the subclass execute()
-      - Capturing stdout/stderr
-      - Calling parse_output() to extract metrics
+
+    All models are dynamic-shape: the per-run sequence-length scale (the OGA
+    ``max_length`` / KV-cache cap, and for PPL the wikitext2 chunk window) is
+    taken from ``test_params['seq_len']`` (the current sweep value injected by
+    run_accuracy.py), NOT from a fixed length in the model's genai_config. So
+    run() no longer reads ``decoder.fixed_prompt_length`` / ``sliding_window``.
     """
 
     name: str = "base"
 
     def run(self, model_dir: str, test_params: dict) -> TestResult:
-        """Run the test: extract seqlen, create test output dir, call execute.
+        """Verify genai_config exists, create the test output dir, call execute.
 
-        test_params may contain an ``output_dir`` key injected by the
-        orchestrator.  If present, a ``<output_dir>/<test_name>/`` sub-
-        directory is created and stored back as ``test_params["output_dir"]``
-        so that ``execute()`` can use it directly.
+        test_params carries an ``output_dir`` key injected by the orchestrator;
+        a ``<output_dir>/<test_name>/`` sub-directory is created and stored back
+        so ``execute()`` can use it directly. ``seq_len`` (the current sweep
+        value) is also injected by the orchestrator.
         """
         genai_config_path = os.path.join(model_dir, "genai_config.json")
         if not os.path.isfile(genai_config_path):
@@ -47,24 +50,19 @@ class BaseTest(ABC):
                 error_msg=f"genai_config.json not found at {genai_config_path}",
             )
 
-        try:
-            model_params = extract_model_params(genai_config_path)
-        except ValueError as e:
-            return TestResult(
-                success=False, metrics={}, stdout="", stderr="",
-                error_msg=str(e),
-            )
-
         top_output_dir = test_params.get("output_dir", "results")
         test_output_dir = os.path.join(top_output_dir, self.name)
         os.makedirs(test_output_dir, exist_ok=True)
         test_params["output_dir"] = test_output_dir
 
-        print(f"  [{self.name}] seqlen={model_params['seqlen']}, "
-              f"context_length={model_params['context_length']}, model_dir={model_dir}")
+        print(f"  [{self.name}] seq_len={test_params.get('seq_len')}, "
+              f"model_dir={model_dir}")
 
         try:
-            result = self.execute(model_dir, model_params, test_params)
+            # model_params is retained as an extension point (per-model values
+            # derived from the graph/config); empty today since every test
+            # takes its sequence-length scale from test_params['seq_len'].
+            result = self.execute(model_dir, model_params={}, test_params=test_params)
         except Exception as e:
             return TestResult(
                 success=False, metrics={}, stdout="", stderr="",
@@ -80,10 +78,13 @@ class BaseTest(ABC):
 
         Args:
             model_dir: path to model directory (contains genai_config.json)
-            model_params: seqlen, context_length (from genai_config.json)
+            model_params: reserved extension point for per-model values; empty
+                today (every test reads its sequence-length scale from
+                test_params['seq_len']).
             test_params: test-specific params from test_config.json, plus
-                ``output_dir`` — the test-specific output directory
-                (``<top_output_dir>/<test_name>/``) created by ``run()``.
+                ``output_dir`` (the ``<top_output_dir>/<test_name>/`` directory
+                created by ``run()``) and ``seq_len`` (the current per-iteration
+                sequence-length scale injected by the orchestrator).
         """
         ...
 

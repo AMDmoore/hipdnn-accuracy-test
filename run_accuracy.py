@@ -133,10 +133,14 @@ def main():
             switch_genai_config(model_dir, config_file)
 
             test_params["output_dir"] = output_dir
-            # Expose the current window size so dynamic-shape tests (e.g. PPL)
-            # can use it directly instead of reading a fixed length from the
-            # model's genai_config.
+            # Expose the current sweep value under two semantically distinct
+            # names (same number, from seq_lengths): ``seq_len`` is the
+            # sequence/window length (PPL chunk, MMLU input cap), while
+            # ``context_length`` is the OGA max_length / KV-cache cap. Dynamic
+            # tests pick whichever fits their CLI flag instead of reading a
+            # fixed length from the model's genai_config.
             test_params["seq_len"] = sl
+            test_params["context_length"] = sl
             result = test_instance.run(model_dir, test_params)
 
             collector.record(
