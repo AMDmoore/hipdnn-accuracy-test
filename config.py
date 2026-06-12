@@ -33,6 +33,11 @@ def load_test_config(config_path: str) -> dict:
                 f"genai_config for seq_len={seq_key} not found: {cfg_path}"
             )
 
+    # Every seq_length must map 1:1 to an explicit genai_configs key. For a
+    # dynamic-shape model that uses one shape-agnostic config, list each window
+    # size with the same file (e.g. {"1024": "genai_config.json", "2048":
+    # "genai_config.json"}) so the mapping stays self-documenting — each key
+    # names the case it belongs to.
     for test_name, test_cfg in config["tests"].items():
         if "seq_lengths" not in test_cfg:
             raise ValueError(f"Test '{test_name}' must have 'seq_lengths' list")
