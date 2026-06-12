@@ -17,12 +17,14 @@ from datetime import datetime
 from config import load_test_config, setup_package_env
 from results.reporter import ResultCollector
 from tests.ppl import PPLTest
+from tests.ppl_vlm import PPLVLMTest
 from tests.mmlu import MMLUTest
 from tests.runmodel import RUNMODELTest
 from tests.tinygsm8k import TINYGSM8KTest
 
 TEST_REGISTRY = {
     "PPL": PPLTest,
+    "PPL_VLM": PPLVLMTest,
     "MMLU": MMLUTest,
     "RUNMODEL": RUNMODELTest,
     "TINYGSM8K": TINYGSM8KTest,
@@ -33,6 +35,9 @@ def switch_genai_config(model_dir: str, config_filename: str):
     """Copy the seq-specific genai_config to genai_config.json."""
     src = os.path.join(model_dir, config_filename)
     dst = os.path.join(model_dir, "genai_config.json")
+    if os.path.abspath(src) == os.path.abspath(dst):
+        print(f"  genai_config: already using {config_filename}")
+        return
     print(f"  Switching genai_config: {config_filename} -> genai_config.json")
     shutil.copy2(src, dst)
 

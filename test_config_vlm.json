@@ -1,0 +1,22 @@
+{
+    "model_dir": "D:/Users/shoucair/Qwen3.5-9B-fp16-ve-fp16-int4-text-gs32-dml",
+    "package_dir": "D:/Users/shoucair/package_gfx1151_therock7.11",
+    "therock_dist": "C:/workspace/therock",
+    "genai_configs": {
+        "allgpu": "genai_config_allgpu.json",
+        "allcpu": "genai_config_allcpu.json"
+    },
+    "tests": {
+        "PPL_VLM": {
+            "seq_lengths": ["allgpu"],
+            "params": {
+                "dataset": "lmms-lab/flickr30k",
+                "split": "test",
+                "limit": 50,
+                "image_size": 896,
+                "max_length": 1024,
+                "instruction": "Describe this image briefly."
+            }
+        }
+    }
+}
