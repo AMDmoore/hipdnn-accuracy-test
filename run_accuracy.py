@@ -133,6 +133,10 @@ def main():
             switch_genai_config(model_dir, config_file)
 
             test_params["output_dir"] = output_dir
+            # Expose the current window size so dynamic-shape tests (e.g. PPL)
+            # can use it directly instead of reading a fixed length from the
+            # model's genai_config.
+            test_params["seq_len"] = sl
             result = test_instance.run(model_dir, test_params)
 
             collector.record(
