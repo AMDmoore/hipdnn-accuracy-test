@@ -21,6 +21,7 @@ import runpy
 import sys
 
 EP_DLLS = {
+    "AMDGPU": "amdgpu-ep.dll",
     "MorphiZenEP": "onnxruntime_morphizen_ep.dll",
 }
 
