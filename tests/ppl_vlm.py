@@ -46,11 +46,12 @@ class PPLVLMTest(BaseTest):
             "-v",
         ]
 
-        # Bypass BaseTest.run_subprocess on purpose: it auto-injects
-        # ``_ep_bootstrap.py``, which imports onnxruntime_genai BEFORE our
-        # script's top-level ORT-DLL pre-load can run — defeating the
-        # workaround for stale pip ORT (1.23 vs the 1.25+ Qwen3.5 needs).
-        # perplexity_vlm.py registers MorphiZenEP itself, post-pre-load.
+        # Run perplexity_vlm.py directly (not via BaseTest.run_subprocess) so its
+        # top-level onnxruntime.dll pre-load runs BEFORE onnxruntime_genai is
+        # imported — the workaround for stale pip ORT (1.23 vs the 1.25+ Qwen3.5
+        # needs). EP registration is handled by OGA from the <EP>_EP_PATH env var
+        # (exported by setup_package_env, inherited here); no explicit register
+        # call is needed.
         print(f"  [{self.name}] Running: {' '.join(cmd)}")
         try:
             proc = subprocess.run(

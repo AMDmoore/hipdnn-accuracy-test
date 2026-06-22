@@ -64,6 +64,10 @@ def setup_package_env(package_dir: str, therock_dist: str = None):
         PATH                — prepends bin/ so DLLs are found at runtime
         HIP_CUSTOM_KERNELS_DIR — points to lib/ for HIP kernel loading
         THEROCK_DIST        — TheRock SDK path (if provided)
+        <EP>_EP_PATH        — absolute path to the plugin EP DLL, so OGA's
+                              Interface self-registers it (discovery step #1)
+                              with NO explicit register_execution_provider_library
+                              call needed in any test script / bootstrap.
     """
     package_dir = os.path.abspath(package_dir)
     bin_dir = os.path.join(package_dir, "bin")
@@ -80,6 +84,22 @@ def setup_package_env(package_dir: str, therock_dist: str = None):
     print(f"Package env : {package_dir}")
     print(f"  bin (PATH): {bin_dir}")
     print(f"  lib (HIP) : {lib_dir}")
+
+    # Point OGA at the plugin EP DLL via the <EP>_EP_PATH env var. OGA's EP
+    # Interface ctor checks this env var FIRST (before adjacency / cwd search)
+    # and lazily calls OgaRegisterExecutionProviderLibrary itself — so no test
+    # script needs to call register_execution_provider_library explicitly.
+    # We set both the legacy MorphiZen name and the new AMDGPU name; whichever
+    # the deployed OGA looks up will be found, the other is harmless.
+    _ep_dll_by_env = {
+        "MORPHIZEN_EP_PATH": "onnxruntime_morphizen_ep.dll",
+        "AMDGPU_EP_PATH": "amdgpu-ep.dll",
+    }
+    for env_name, dll_name in _ep_dll_by_env.items():
+        dll_path = os.path.join(bin_dir, dll_name)
+        if os.path.isfile(dll_path):
+            os.environ[env_name] = dll_path
+            print(f"  {env_name}: {dll_path}")
 
     if therock_dist:
         therock_dist = os.path.abspath(therock_dist)

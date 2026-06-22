@@ -13,10 +13,10 @@ Differences vs ``perplexity.py``:
     template + image tokens + instruction) is masked with ``-100`` in the
     label tensor so it does not contribute to PPL.
 
-Plugin EP registration (MorphiZenEP) is handled centrally by
-``tests/_ep_bootstrap.py`` when this script is invoked through the orchestrator.
-Running directly from a shell skips that wrapper, so the active EP is whatever
-``genai_config.json`` selects.
+Plugin EP registration is handled by OGA itself: ``setup_package_env`` exports
+``<EP>_EP_PATH`` (e.g. ``MORPHIZEN_EP_PATH``) with the absolute DLL path, which
+this subprocess inherits, and OGA's EP Interface self-registers from that env var
+on first use. No explicit ``register_execution_provider_library`` call is needed.
 
 Output line that the wrapper parses:
     Perplexity: <float>
@@ -80,38 +80,6 @@ import numpy as np
 import onnxruntime_genai as og
 import torch
 from PIL import Image
-
-
-def _register_plugin_eps_self() -> None:
-    """Register plugin EPs (e.g. MorphiZenEP) found on PATH.
-
-    Mirrors what tests/_ep_bootstrap.py does centrally for the LLM tests, but
-    runs HERE (after our ORT pre-load) so the multimodal sub-sessions in
-    genai_config can resolve `provider_options: [{ "MorphiZenEP": {} }]`.
-
-    PPLVLMTest.execute() bypasses ``_ep_bootstrap.py`` injection — the bootstrap
-    imports OGA before our ORT pre-load can run, defeating the workaround.
-    """
-    if not hasattr(og, "register_execution_provider_library"):
-        return
-    plugin_eps = {"MorphiZenEP": "onnxruntime_morphizen_ep.dll"}
-    for ep_name, dll_name in plugin_eps.items():
-        for d in (os.environ.get("PATH", "") or "").split(os.pathsep):
-            if not d:
-                continue
-            cand = os.path.join(d, dll_name)
-            if os.path.isfile(cand):
-                try:
-                    og.register_execution_provider_library(ep_name, cand)
-                    print(f"[perplexity_vlm] Registered plugin EP: "
-                          f"{ep_name} -> {cand}")
-                except Exception as e:
-                    print(f"[perplexity_vlm] WARN: failed to register "
-                          f"{ep_name}: {e}", file=sys.stderr)
-                break
-
-
-_register_plugin_eps_self()
 
 
 # ----------------------------------------------------------------------------
