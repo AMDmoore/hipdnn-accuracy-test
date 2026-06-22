@@ -43,9 +43,9 @@ def get_wikitext2(tokenizer, dataset="non-raw"):
 
 def main(args):
     # Compute perplexity using the sum of decomposed log-likelihoods of disjoint chunks of the dataset
-    # Plugin EP registration (MorphiZenEP, etc.) is handled centrally by
-    # tests/_ep_bootstrap.py, which the orchestrator injects in front of
-    # this script's invocation.
+    # Plugin EP registration is handled by OGA itself from the <EP>_EP_PATH env
+    # var (exported by setup_package_env and inherited by this subprocess); no
+    # explicit register_execution_provider_library call is needed here.
     print(f"Calculating Perplexity on wikitext2 test set ...")
     if args.verbose: print("Loading model...")
     model = og.Model(f'{args.model}')
