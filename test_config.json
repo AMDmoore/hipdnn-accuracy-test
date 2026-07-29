@@ -13,7 +13,8 @@
         "PPL": {
             "seq_lengths": [2048],
             "params": {
-                "nsamples": 0.02
+                "nsamples": 0.1,
+                "stride": 256
             }
         },
         "MMLU": {

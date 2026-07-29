@@ -51,6 +51,13 @@ class PPLTest(BaseTest):
             "-s", "non-raw",
         ]
 
+        # --stride only affects the pruned (last-position-only) sliding-window
+        # path in perplexity.py; full-logits models ignore it. Pass through only
+        # when configured so full-logits runs keep their original CLI.
+        stride = test_params.get("stride")
+        if stride is not None:
+            cmd += ["--stride", str(int(stride))]
+
         rc, stdout, stderr = self.run_subprocess(cmd)
 
         metrics = {}
