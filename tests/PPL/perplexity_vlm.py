@@ -311,9 +311,10 @@ def compute_sample_nll(
             # was bound at set_inputs time or appended via append_tokens, since
             # in both cases the graph runs the same prefill compute.
             generator.set_inputs(prompt_inputs)
-            # Append the caption tokens so the prefill covers full_len. For
-            # the all-position path this is equivalent to set_inputs(full_inputs);
-            # for the last-position path we'll rewind + replay below.
+            # Append the caption tokens so the prefill covers full_len. The
+            # all-position path consumes this full prefill directly; the
+            # last-position path only uses it to detect the logits seq dim,
+            # then re-prefills per target position below (rewind-free).
             caption_ids = full_ids[prompt_len:].astype(np.int32).tolist()
             generator.append_tokens(caption_ids)
             generator.generate_next_token()  # triggers prefill
@@ -377,66 +378,39 @@ def compute_sample_nll(
                     topk_ids_out = [[int(x) for x in row] for row in tids.tolist()]
                     topk_logits_out = [[float(x) for x in row] for row in tvals.tolist()]
             else:
-                # Last-position-only path. The graph emits logits of shape
-                # [B, 1, V] = P(next | full prefix). For PPL we need
-                #   NLL = -sum_{t=prompt_len-1..full_len-2} log P(full_ids[t+1] | full_ids[:t+1])
-                # which is target_len contributions. We get them via
-                # teacher-forced per-token decode:
-                #   - the just-completed prefill of full_ids[:full_len] gave us
-                #     logits = P(? | full_ids[:full_len]) (one position past the
-                #     end — useful only as a sanity check, not a target).
-                #   - rewind to position prompt_len, then for i in 0..target_len-1:
-                #       * append_tokens([full_ids[prompt_len + i]]) — feeds the
-                #         actual target token (teacher forcing) and runs one
-                #         forward pass; logits_after = P(? | prefix + target[..i])
-                #         is the prediction for target[i+1], NOT target[i].
-                #     So the logits we want for target[i] come from the forward
-                #     pass that consumes target[i-1] (or the prefill of the
-                #     prompt for target[0]).
-                # Implementation: rewind to prompt_len-1, then loop:
-                #   step k=0: prefix = full_ids[:prompt_len], read logits =
-                #     P(? | prompt) -> NLL for full_ids[prompt_len] = target[0]
-                #   step k>0: append target[k-1], read logits = P(? | prompt+target[:k])
-                #     -> NLL for target[k]
-                # ``append_tokens`` queues tokens and ``generate_next_token``
-                # runs the forward pass + samples (we ignore the sample).
+                # Last-position-only path. The decoder emits logits [B, 1, V] =
+                # P(next | prefix), so a single full-length prefill only yields
+                # the final position's logits, not the intermediate per-target
+                # logits that PPL needs.
+                #
+                # Score the targets with a SINGLE generator via incremental
+                # teacher forcing:
+                #   * set_inputs(prompt) prefills the prompt ONCE (the vision
+                #     encoder and image features are computed a single time) and
+                #     leaves logits = P(? | prompt) = the prediction for
+                #     target[0].
+                #   * append_tokens([target[j-1]]) then runs ONE decode step and
+                #     leaves logits = P(? | prompt + target[:j]) = the prediction
+                #     for target[j] = full_ids[prompt_len + j].
+                #
+                # Only append_tokens is used (never generate_next_token), so no
+                # sampled token is inserted into the sequence and rewind_to is
+                # never needed. append_tokens already computes the logits, so
+                # get_output("logits") is valid immediately after it, and the
+                # amdgpu EP supports this continuous decoding. This avoids the
+                # per-layer KV-cache rewind bug (on gemma4 multimodal + amdgpu +
+                # past_present_share_buffer=false the per-layer branch loses the
+                # sequence-length bookkeeping across a rewind, so the pre-
+                # allocated present.* shape disagrees with the EP-computed shape
+                # and the native layer fatally aborts) while running the vision
+                # encoder and prompt prefill only ONCE: O(target_len) cheap
+                # single-token decode steps instead of O(target_len) full
+                # prefills.
                 if verbose:
                     print(f"  [last-pos-only] full_len={full_len}, "
                           f"prompt_len={prompt_len}, target_len={target_len}; "
-                          f"running per-token decode (this is the slow path)")
+                          f"incremental teacher forcing (rewind-free)")
 
-                # Rewind to position prompt_len. token_count() reports the
-                # current sequence length; after the prefill of full_len + 1
-                # sampled tokens it is full_len + 1. The exact value doesn't
-                # matter — rewind_to(prompt_len) puts the KV cache back to the
-                # state right after the prompt was consumed.
-                generator.rewind_to(prompt_len)
-
-                # Step k=0: read logits at position prompt_len-1, predicting
-                # target[0]. The KV cache currently contains exactly prompt_len
-                # tokens; the LAST forward pass that filled position prompt_len-1
-                # was the prompt prefill we just rewound past. ``get_output``
-                # still returns the cached logits from that prefill — but to
-                # be safe we re-run a one-step "no-op" by appending a single
-                # token, reading the logits, then rewinding again.
-                # Actually: after rewind_to(prompt_len), the next forward pass
-                # is decode-mode. Append target[0] to consume it, read logits
-                # — those logits are P(? | prompt + target[0]) = prediction for
-                # target[1], not target[0]. That doesn't help.
-                # Solution: rewind to prompt_len - 1 and append the LAST prompt
-                # token. The forward pass on that single token, with KV cache
-                # holding prompt_len-1 tokens, computes logits for position
-                # prompt_len-1 = P(? | prompt[:prompt_len]) = target[0].
-                generator.rewind_to(prompt_len - 1)
-                last_prompt_tok = int(full_ids[prompt_len - 1])
-                generator.append_tokens([last_prompt_tok])
-                generator.generate_next_token()
-                logits_step = np.asarray(generator.get_output("logits"))
-                if logits_step.ndim == 3:
-                    logits_step = logits_step[0]
-                # logits_step shape is [1, V] (last position of the 1-token
-                # decode step).
-                logits_t = torch.from_numpy(logits_step.astype(np.float32))
                 loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
                 sum_nll = 0.0
                 # Per-token records (parallel to the all-position path) so the
@@ -447,7 +421,7 @@ def compute_sample_nll(
                 target_logit_out, lse_out, topk_ids_out, topk_logits_out = [], [], [], []
 
                 def _record_step(row_t, tid, snll):
-                    # row_t: torch tensor [V] of logits for this decode step.
+                    # row_t: torch tensor [V] of logits for this target position.
                     tgt_ids_out.append(int(tid))
                     per_tok_out.append(float(snll))
                     top1_out.append(int(row_t.argmax().item()))
@@ -459,43 +433,35 @@ def compute_sample_nll(
                         topk_ids_out.append([int(x) for x in ti.tolist()])
                         topk_logits_out.append([float(x) for x in tv.tolist()])
 
-                target_id = int(full_ids[prompt_len])
-                step_logits = logits_t[-1:, :]
-                step_label = torch.tensor([target_id], dtype=torch.int64)
-                step_nll = loss_fct(step_logits, step_label).item()
-                if not np.isfinite(step_nll):
-                    if verbose:
-                        print(f"  [diag] non-finite NLL at decode step 0 "
-                              f"(target_id={target_id}); aborting sample")
-                    return None
-                sum_nll += step_nll
-                _record_step(step_logits[-1], target_id, step_nll)
-
-                # Steps k=1..target_len-1: append target[k-1], decode 1 step,
-                # logits = P(? | prompt + target[:k]) = prediction for target[k].
-                for k in range(1, target_len):
-                    prev_target = int(full_ids[prompt_len + k - 1])
-                    target_k = int(full_ids[prompt_len + k])
-                    # KV cache currently holds prompt_len + (k-1) + 1 tokens
-                    # (last append + sampled). Rewind sampled tail to keep the
-                    # cache in lock-step with the actual sequence we want.
-                    generator.rewind_to(prompt_len + k - 1)
-                    generator.append_tokens([prev_target])
-                    generator.generate_next_token()
-                    logits_step = np.asarray(generator.get_output("logits"))
-                    if logits_step.ndim == 3:
-                        logits_step = logits_step[0]
-                    logits_t = torch.from_numpy(logits_step.astype(np.float32))
-                    step_logits = logits_t[-1:, :]
-                    step_label = torch.tensor([target_k], dtype=torch.int64)
-                    step_nll = loss_fct(step_logits, step_label).item()
-                    if not np.isfinite(step_nll):
-                        if verbose:
-                            print(f"  [diag] non-finite NLL at decode step "
-                                  f"{k} (target_id={target_k}); aborting sample")
-                        return None
-                    sum_nll += step_nll
-                    _record_step(step_logits[-1], target_k, step_nll)
+                # A single generator: prompt prefilled once, then each step
+                # appends the true previous target token (teacher forcing) and
+                # reads the new final-position logits. No generate_next_token
+                # and no rewind_to.
+                tf_gen = og.Generator(model, params)
+                try:
+                    tf_gen.set_inputs(prompt_inputs)  # prefill prompt (vision once)
+                    for j in range(target_len):
+                        if j > 0:
+                            tf_gen.append_tokens(
+                                [int(full_ids[prompt_len + j - 1])])
+                        logits_step = np.asarray(tf_gen.get_output("logits"))
+                        if logits_step.ndim == 3:
+                            logits_step = logits_step[0]
+                        # Final-position logits = prediction for target[j].
+                        step_logits = torch.from_numpy(
+                            logits_step[-1:, :].astype(np.float32))
+                        target_j = int(full_ids[prompt_len + j])
+                        step_label = torch.tensor([target_j], dtype=torch.int64)
+                        step_nll = loss_fct(step_logits, step_label).item()
+                        if not np.isfinite(step_nll):
+                            if verbose:
+                                print(f"  [diag] non-finite NLL at target step "
+                                      f"{j} (target_id={target_j}); aborting sample")
+                            return None
+                        sum_nll += step_nll
+                        _record_step(step_logits[-1], target_j, step_nll)
+                finally:
+                    del tf_gen
         finally:
             del generator
 
@@ -714,11 +680,11 @@ if __name__ == "__main__":
                         choices=["match", "shuffle", "none"],
                         help="Visual-grounding mode. 'match': caption_i paired "
                              "with its own image_i (canonical PPL). 'shuffle': "
-                             "caption_i paired with image_(i+1)%N (visual-"
+                             "caption_i paired with image_(i+1)%%N (visual-"
                              "neglect probe). 'none': caption_i with no image "
                              "(language-prior baseline). Run all three to "
                              "compute PPL_shuf/PPL_match and PPL_none/PPL_match "
-                             "ratios — both should be > 1 for a healthy VLM.")
+                             "ratios - both should be > 1 for a healthy VLM.")
     # accept (and ignore) -d/--device for symmetry with perplexity.py callers
     parser.add_argument("--device", type=str, required=False, default="cpu",
                         choices=["cpu", "aie", "gpu"], help="(ignored)")
