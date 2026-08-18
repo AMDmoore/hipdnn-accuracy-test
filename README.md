@@ -43,9 +43,9 @@ Everything is orchestrated by `run_accuracy.py`. You only edit a single configur
 | Dependency | Notes |
 |---|---|
 | OS | Windows (scripts target PowerShell 5.1) |
-| Python | **3.10** (verified; must match the OGA version) |
+| Python | **3.14** (must match the OGA version) |
 | Deployment package | Directory with `bin/` (DLLs + exe) and `lib/` (HIP custom kernels) |
-| OGA runtime | Directory with `onnxruntime_genai.cp310-win_amd64.pyd` and `onnxruntime-genai.dll` |
+| OGA runtime | Directory with `onnxruntime_genai.cp314-win_amd64.pyd` and `onnxruntime-genai.dll` |
 | TheRock SDK | ROCm SDK directory (with `bin/`, `lib/`) |
 | ONNX model directory | OGA-format model with `model.onnx` and `genai_config*.json` |
 
@@ -55,12 +55,12 @@ Have the paths to these directories ready in advance: the OGA runtime, the deplo
 
 ## Setup
 
-Create an isolated Python 3.10 environment and install the pinned dependencies:
+Create an isolated Python 3.14 environment and install the pinned dependencies:
 
 ```powershell
-# 1. Create a venv with Python 3.10
-py -3.10 -m venv C:\work\venv310
-C:\work\venv310\Scripts\Activate.ps1
+# 1. Create a venv with Python 3.14
+py -3.14 -m venv C:\work\venv314
+C:\work\venv314\Scripts\Activate.ps1
 
 # 2. Upgrade pip and install dependencies
 python -m pip install --upgrade pip
@@ -80,7 +80,7 @@ Then make the local OGA build importable in the venv so that `import onnxruntime
 
 1. **Install the OGA wheel** — if you have a built wheel, run `pip install onnxruntime_genai-*.whl`.
 2. **Point at the `.pyd` + DLL** — add the OGA runtime directory to `PYTHONPATH` and register it with `os.add_dll_directory` so the adjacent `onnxruntime-genai.dll` loads.
-3. **Copy into `site-packages`** — copy `onnxruntime_genai.cp310-win_amd64.pyd` and `onnxruntime-genai.dll` into the venv's `site-packages`.
+3. **Copy into `site-packages`** — copy `onnxruntime_genai.cp314-win_amd64.pyd` and `onnxruntime-genai.dll` into the venv's `site-packages`.
 
 ---
 
@@ -305,10 +305,10 @@ Call chain of a single run: `run_accuracy.py` → load config → `setup_package
 ## Troubleshooting
 
 **Q: `import onnxruntime_genai` fails with a version/ABI error.**
-The OGA `.pyd` is `cp310` ABI, so the venv must use Python 3.10. Recreate the venv with a 3.10 interpreter.
+The OGA `.pyd` is `cp314` ABI, so the venv must use Python 3.14. Recreate the venv with a 3.14 interpreter.
 
 **Q: `import onnxruntime_genai` fails / DLL not found.**
-Make sure the OGA runtime directory contains both `onnxruntime_genai.cp310-win_amd64.pyd` and `onnxruntime-genai.dll` and is importable (on `PYTHONPATH` / `os.add_dll_directory`), and that `package_dir` and `therock_dist` in `test_config.json` are correct so their `bin\` directories get onto the DLL search path.
+Make sure the OGA runtime directory contains both `onnxruntime_genai.cp314-win_amd64.pyd` and `onnxruntime-genai.dll` and is importable (on `PYTHONPATH` / `os.add_dll_directory`), and that `package_dir` and `therock_dist` in `test_config.json` are correct so their `bin\` directories get onto the DLL search path.
 
 **Q: TINYGSM8K phase 2 fails with gsm8k / lm_eval not found.**
 Run `pip install lm-eval` first (it is not part of the default dependencies).
