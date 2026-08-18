@@ -32,7 +32,7 @@ class PPLVLMTest(BaseTest):
         limit = int(test_params.get("limit", 50))
         instruction = test_params.get("instruction", "Describe this image briefly.")
         image_size = int(test_params.get("image_size", 896))
-        max_length = int(test_params.get("max_length", 384))
+        max_length = int(test_params.get("max_length", 1024))
 
         cmd = [
             sys.executable, script,

@@ -12,8 +12,8 @@ It drives a set of standard accuracy benchmarks (PPL, MMLU, GSM8K, etc.) through
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
 - [Configuration file `test_config.json`](#configuration-file-test_configjson)
-- [Running tests](#running-tests)
 - [Test parameters](#test-parameters)
+- [Running tests](#running-tests)
 - [Results](#results)
 - [Project structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
@@ -43,9 +43,9 @@ Everything is orchestrated by `run_accuracy.py`. You only edit a single configur
 | Dependency | Notes |
 |---|---|
 | OS | Windows (scripts target PowerShell 5.1) |
-| Python | **3.14** (must match the OGA `cp314` `.pyd` ABI) |
+| Python | **3.10** (verified; must match the OGA version) |
 | Deployment package | Directory with `bin/` (DLLs + exe) and `lib/` (HIP custom kernels) |
-| OGA runtime | Directory with `onnxruntime_genai.cp314-win_amd64.pyd` and `onnxruntime-genai.dll` |
+| OGA runtime | Directory with `onnxruntime_genai.cp310-win_amd64.pyd` and `onnxruntime-genai.dll` |
 | TheRock SDK | ROCm SDK directory (with `bin/`, `lib/`) |
 | ONNX model directory | OGA-format model with `model.onnx` and `genai_config*.json` |
 
@@ -55,12 +55,12 @@ Have the paths to these directories ready in advance: the OGA runtime, the deplo
 
 ## Setup
 
-Create an isolated Python 3.14 environment and install the pinned dependencies:
+Create an isolated Python 3.10 environment and install the pinned dependencies:
 
 ```powershell
-# 1. Create a venv with Python 3.14
-py -3.14 -m venv C:\work\venv314
-C:\work\venv314\Scripts\Activate.ps1
+# 1. Create a venv with Python 3.10
+py -3.10 -m venv C:\work\venv310
+C:\work\venv310\Scripts\Activate.ps1
 
 # 2. Upgrade pip and install dependencies
 python -m pip install --upgrade pip
@@ -80,7 +80,7 @@ Then make the local OGA build importable in the venv so that `import onnxruntime
 
 1. **Install the OGA wheel** — if you have a built wheel, run `pip install onnxruntime_genai-*.whl`.
 2. **Point at the `.pyd` + DLL** — add the OGA runtime directory to `PYTHONPATH` and register it with `os.add_dll_directory` so the adjacent `onnxruntime-genai.dll` loads.
-3. **Copy into `site-packages`** — copy `onnxruntime_genai.cp314-win_amd64.pyd` and `onnxruntime-genai.dll` into the venv's `site-packages`.
+3. **Copy into `site-packages`** — copy `onnxruntime_genai.cp310-win_amd64.pyd` and `onnxruntime-genai.dll` into the venv's `site-packages`.
 
 ---
 
@@ -97,9 +97,7 @@ Top-level fields shared by all configs:
 | `therock_dist` | TheRock SDK directory |
 | `output_dir` | base output directory; actual results go to `<output_dir>/<model_name>_<timestamp>/` |
 | `genai_configs` | **key → genai_config file** mapping. Before each entry, the framework copies the mapped file to `genai_config.json` (the key's meaning differs for LLM/VLM, see below) |
-| `tests` | set of tests to run |
-| `tests.<NAME>.seq_lengths` | list of keys the test iterates over; **each value must exist as a key in `genai_configs`** |
-| `tests.<NAME>.params` | parameters passed to the test (see [Test parameters](#test-parameters)) |
+| `tests` | set of tests to run; each test has a `seq_lengths` list and a `params` object whose meaning differs for LLM/VLM (see below) |
 
 `package_dir` and `therock_dist` must point at the deployment package and the TheRock SDK — this is where the package and TheRock DLL paths get configured. At runtime `setup_package_env()` in `run_accuracy.py` uses them to wire the DLL search path automatically.
 
@@ -126,10 +124,14 @@ Top-level fields shared by all configs:
 }
 ```
 
-For LLM, `seq_lengths` is a **sequence-length sweep list** (all models are treated as dynamic-shape):
+Per-test fields for LLM:
 
-- For `PPL` it is the wikitext2 chunk window; for `MMLU` it is the input-length cap; for `RUNMODEL` / `TINYGSM8K` it is the OGA `max_length` (KV-cache cap, must be ≥ `prompt_len + max_new_tokens`).
-- Each value in `seq_lengths` must have a matching key in `genai_configs`. If a dynamic model has only one config, map every length to the same file, e.g. `{"2048": "genai_config.json", "4096": "genai_config.json"}`, to keep the mapping self-documenting.
+| Field | Meaning |
+|---|---|
+| `tests.<NAME>.seq_lengths` | **sequence-length sweep list** (all models are treated as dynamic-shape). For `PPL` it is the wikitext2 chunk window; for `MMLU` the input-length cap; for `RUNMODEL` / `TINYGSM8K` the OGA `max_length` (KV-cache cap, must be ≥ `prompt_len + max_new_tokens`). Each value **must exist as a key in `genai_configs`** |
+| `tests.<NAME>.params` | per-test parameters (see [Test parameters](#test-parameters)) |
+
+If a dynamic model has only one config, map every length to the same file, e.g. `{"2048": "genai_config.json", "4096": "genai_config.json"}`, to keep the mapping self-documenting.
 
 ### VLM config (`PPL_VLM` only)
 
@@ -160,50 +162,22 @@ For LLM, `seq_lengths` is a **sequence-length sweep list** (all models are treat
 }
 ```
 
-Key differences between VLM and LLM:
+Per-test fields for VLM:
 
-- **`seq_lengths` is not a sequence length for VLM.** It is repurposed as a list of "provider variant" names (e.g. `allgpu` / `allcpu`), each mapping to a `genai_config_<variant>.json`. For each name the framework swaps the mapped config into `genai_config.json`, switching the EP layout for that run (all-GPU / all-CPU / etc.).
-- **VLM does not use fixed-size chunking; the prefill length varies per sample** and is not a fixed 2048. Each sample's sequence = prompt (chat template + image tokens + instruction) + caption text, whose length depends on the number of image tokens (driven by `image_size`) and the caption length.
-- The actual sequence-length constraint is `params.max_length` (default 384, set to 1024 in the example), i.e. the OGA KV-buffer cap. At runtime it also grows to at least fit the current sample (`max(max_length, full_len + 1)`); samples that exceed the cap are skipped. So to evaluate longer captions, raise `params.max_length` instead of changing `seq_lengths`.
+| Field | Meaning |
+|---|---|
+| `PPL_VLM.seq_lengths` | **not a sequence length for VLM.** Repurposed as a list of "provider variant" names (e.g. `allgpu` / `allcpu`), each mapping to a `genai_config_<variant>.json`. For each name the framework swaps the mapped config into `genai_config.json`, switching the EP layout for that run (all-GPU / all-CPU / etc.). Each value **must exist as a key in `genai_configs`** |
+| `PPL_VLM.params` | per-test parameters (see [Test parameters](#test-parameters)) |
+
+Notes:
+
+- **VLM does not use fixed-size chunking; the prefill length varies per sample.** Each sample's sequence = prompt (chat template + image tokens + instruction) + caption text. The image-token count is fixed by `image_size` (the image is resized to a square, so it produces the same number of tokens every sample), and only the caption length varies.
+- `params.max_length` is the OGA KV-buffer cap. It matters because the genai_config default (e.g. `262144` with `past_present_share_buffer: true`) would pre-allocate an enormous KV cache; setting `max_length` shrinks that to a workable size. It is also the per-sample inclusion threshold: any sample whose full length exceeds `max_length` is **skipped**. So `max_length` must be large enough to fit `prompt (≈ image tokens) + caption`; raise it (not `seq_lengths`) to admit longer samples.
 
 ### Bundled config references
 
 - `test_config.json` — LLM tests (PPL / MMLU / RUNMODEL / TINYGSM8K)
 - `test_config_vlm.json` — VLM perplexity test (`PPL_VLM`)
-
----
-
-## Running tests
-
-After activating the venv, run from the project root:
-
-```powershell
-# LLM: run all tests listed in the config (default test_config.json)
-python run_accuracy.py --config test_config.json
-
-# LLM: run only specific tests
-python run_accuracy.py --tests PPL
-
-# LLM: run only specific sequence lengths
-python run_accuracy.py --tests PPL --seq-len 2048
-
-# VLM: use the VLM config; only PPL_VLM is supported
-python run_accuracy.py --config test_config_vlm.json --tests PPL_VLM
-
-# Override model / package / output directory from the command line
-python run_accuracy.py --model-dir D:/models/other --package-dir D:/pkgs/xxx --output-dir results/my_run
-```
-
-Command-line arguments:
-
-| Argument | Meaning |
-|---|---|
-| `--config` | config file path (default `test_config.json`) |
-| `--tests` | tests to run (multiple allowed, space-separated). LLM: `PPL` / `MMLU` / `RUNMODEL` / `TINYGSM8K`; VLM: `PPL_VLM` only. If omitted, runs everything in the config |
-| `--seq-len` | run only the given sequence lengths (filtered from the config's `seq_lengths`) |
-| `--model-dir` | override `model_dir` from the config |
-| `--package-dir` | override `package_dir` from the config |
-| `--output-dir` | exact output directory for this run |
 
 ---
 
@@ -245,9 +219,43 @@ No extra required parameters; the sequence length comes from `seq_lengths`.
 | `dataset` | `lmms-lab/flickr30k` | dataset |
 | `split` | `test` | split |
 | `limit` | `50` | number of samples |
-| `image_size` | `896` | square image side length |
-| `max_length` | `384` | max length |
+| `image_size` | `896` | square side length the image is resized to (also fixes the image-token count) |
+| `max_length` | `1024` | OGA KV-buffer cap; also the per-sample inclusion threshold (samples longer than this are skipped). |
 | `instruction` | `Describe this image briefly.` | prompt instruction |
+
+---
+
+## Running tests
+
+After activating the venv, run from the project root:
+
+```powershell
+# LLM: run all tests listed in the config (default test_config.json)
+python run_accuracy.py --config test_config.json
+
+# LLM: run only specific tests
+python run_accuracy.py --tests PPL
+
+# LLM: run only specific sequence lengths
+python run_accuracy.py --tests PPL --seq-len 2048
+
+# VLM: use the VLM config; only PPL_VLM is supported
+python run_accuracy.py --config test_config_vlm.json --tests PPL_VLM
+
+# Override model / package / output directory from the command line
+python run_accuracy.py --model-dir D:/models/other --package-dir D:/pkgs/xxx --output-dir results/my_run
+```
+
+Command-line arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--config` | config file path (default `test_config.json`) |
+| `--tests` | tests to run (multiple allowed, space-separated). LLM: `PPL` / `MMLU` / `RUNMODEL` / `TINYGSM8K`; VLM: `PPL_VLM` only. If omitted, runs everything in the config |
+| `--seq-len` | run only the given sequence lengths (filtered from the config's `seq_lengths`) |
+| `--model-dir` | override `model_dir` from the config |
+| `--package-dir` | override `package_dir` from the config |
+| `--output-dir` | exact output directory for this run |
 
 ---
 
@@ -297,10 +305,10 @@ Call chain of a single run: `run_accuracy.py` → load config → `setup_package
 ## Troubleshooting
 
 **Q: `import onnxruntime_genai` fails with a version/ABI error.**
-The OGA `.pyd` is `cp314` ABI, so the venv must use Python 3.14. Recreate the venv with a 3.14 interpreter.
+The OGA `.pyd` is `cp310` ABI, so the venv must use Python 3.10. Recreate the venv with a 3.10 interpreter.
 
 **Q: `import onnxruntime_genai` fails / DLL not found.**
-Make sure the OGA runtime directory contains both `onnxruntime_genai.cp314-win_amd64.pyd` and `onnxruntime-genai.dll` and is importable (on `PYTHONPATH` / `os.add_dll_directory`), and that `package_dir` and `therock_dist` in `test_config.json` are correct so their `bin\` directories get onto the DLL search path.
+Make sure the OGA runtime directory contains both `onnxruntime_genai.cp310-win_amd64.pyd` and `onnxruntime-genai.dll` and is importable (on `PYTHONPATH` / `os.add_dll_directory`), and that `package_dir` and `therock_dist` in `test_config.json` are correct so their `bin\` directories get onto the DLL search path.
 
 **Q: TINYGSM8K phase 2 fails with gsm8k / lm_eval not found.**
 Run `pip install lm-eval` first (it is not part of the default dependencies).
