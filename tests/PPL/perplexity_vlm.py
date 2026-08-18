@@ -693,9 +693,11 @@ if __name__ == "__main__":
                         help="Text instruction sent with the image")
     parser.add_argument("--image_size", type=int, default=896,
                         help="Square resize size for input images. Default: 896")
-    parser.add_argument("--max_length", type=int, default=384,
+    parser.add_argument("--max_length", type=int, default=1024,
                         help="OGA search.max_length used for KV buffer sizing. "
-                             "Default 384; raise for longer captions.")
+                             "Default 1024 (fits image_size=896, whose prompt is "
+                             "~800 image tokens); raise for larger images or "
+                             "longer captions.")
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
     parser.add_argument("--dump-jsonl", dest="dump_jsonl", type=str, default=None,
                         help="Write per-sample per-token data (target_ids, "
@@ -732,7 +734,7 @@ if __name__ == "__main__":
         ("limit", 50),
         ("instruction", "Describe this image briefly."),
         ("image_size", 896),
-        ("max_length", 384),
+        ("max_length", 1024),
         ("verbose", False),
         ("mode", "match"),
         ("dump_jsonl", None),
