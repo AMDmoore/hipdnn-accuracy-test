@@ -190,7 +190,7 @@ Notes:
 | Parameter | Default | Meaning |
 |---|---|---|
 | `nsamples` | `1.0` | sampling ratio/count (e.g. `0.1` = 10%); smaller is faster |
-| `stride` | none | sliding-window stride; only applies to the pruned (last-position-only logits) path |
+| `stride` | `256` | sliding-window stride; only applies to the pruned (last-position-only logits) path (full-logits models ignore it). |
 
 ### MMLU (multi-subject multiple choice)
 
