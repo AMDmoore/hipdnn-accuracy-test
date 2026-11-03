@@ -6,12 +6,16 @@ dataset (default: HuggingFace ``lmms-lab/flickr30k`` test split).
 Differences vs ``perplexity.py``:
   - Loads the model via OGA multimodal processor (vision + embedding + decoder
     sub-sessions), instead of treating it as a text-only LLM.
-  - Each sample is one (image, caption) pair, sent through the full multimodal
-    pipeline via ``generator.set_inputs(processor(prompt, images=...))`` —
-    NOT ``append_tokens`` (which is text-only).
-  - NLL is computed only on the *caption* tokens. The prompt portion (chat
-    template + image tokens + instruction) is masked with ``-100`` in the
-    label tensor so it does not contribute to PPL.
+  - Each sample is one (image, caption) pair. NLL is computed only on the
+    caption tokens. The prompt (chat template + image tokens + instruction)
+    is the conditioning context and is not scored.
+  - Logits mode is probed once, with the same rule as ``perplexity.py``.
+    A full-sequence graph prefills prompt+caption in one forward and
+    shift-scores the caption positions. A pruned graph emits one position,
+    so each caption index gets a fresh Generator and one prefill of
+    image + prompt + caption[:j]; the last row scores caption[j].
+    Neither path calls ``append_tokens``, ``generate_next_token``, or
+    ``rewind_to``.
 
 Plugin EP registration is handled by OGA itself: ``setup_package_env`` exports
 ``<EP>_EP_PATH`` (e.g. ``MORPHIZEN_EP_PATH``) with the absolute DLL path, which
@@ -28,6 +32,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -86,27 +91,25 @@ from PIL import Image
 # Dataset loading
 # ----------------------------------------------------------------------------
 
-def load_flickr30k_test(limit: int) -> List[Tuple[Image.Image, str]]:
-    """Load (image, caption) pairs from HuggingFace ``lmms-lab/flickr30k``.
+def load_samples(dataset: str, split: str, limit: int) -> List[Tuple[Image.Image, str]]:
+    """Load up to ``limit`` (PIL.Image, caption) pairs from a HuggingFace dataset.
 
-    Returns the first ``limit`` samples as a list of (PIL.Image, caption_str).
-    Each sample's caption is the first of the 5 reference captions.
+    The ``caption`` column may be a string or a list of reference captions; for
+    a list the first one is used (flickr30k has 5 per image).
     """
     try:
         from datasets import load_dataset
     except ImportError as e:
-        raise RuntimeError(
-            "datasets not installed. Run: pip install datasets"
-        ) from e
+        raise RuntimeError("datasets not installed. Run: pip install datasets") from e
 
-    ds = load_dataset("lmms-lab/flickr30k", split="test", streaming=False)
+    ds = load_dataset(dataset, split=split, streaming=False)
 
     samples: List[Tuple[Image.Image, str]] = []
     for ex in ds:
         if len(samples) >= limit:
             break
         img = ex.get("image", None)
-        if img is None or not isinstance(img, Image.Image):
+        if not isinstance(img, Image.Image):
             continue
         captions = ex.get("caption", None)
         if isinstance(captions, list) and captions:
@@ -120,12 +123,12 @@ def load_flickr30k_test(limit: int) -> List[Tuple[Image.Image, str]]:
         samples.append((img.convert("RGB"), cap))
 
     if not samples:
-        raise RuntimeError("Loaded zero usable samples from lmms-lab/flickr30k")
+        raise RuntimeError(f"No usable samples from {dataset}/{split}")
     return samples
 
 
 # ----------------------------------------------------------------------------
-# Prompt building (mirrors mmmu_eval.py for chat-template handling)
+# Prompt building
 # ----------------------------------------------------------------------------
 
 def load_chat_template(model_dir: str) -> Optional[str]:
@@ -145,13 +148,9 @@ def load_chat_template(model_dir: str) -> Optional[str]:
 def build_messages(instruction: str, with_image: bool = True) -> list:
     """Build a one-turn user message in HF chat-template format.
 
-    ``with_image=True``  -> [image, text] content (the canonical multimodal path).
-    ``with_image=False`` -> text-only content. Used for the visual-neglect
-    sanity mode ``--mode none``: no image marker is present in the prompt, the
-    chat template emits no ``<|vision_start|>...<|vision_end|>`` block, and
-    the OGA processor is called with ``images=None`` so the vision encoder
-    is bypassed entirely. PPL in this mode = ``P(caption | text-prompt only)``,
-    i.e. the model's pure language-prior caption likelihood.
+    ``with_image=False`` is used by ``--mode none``: no image marker is in the
+    prompt and the processor is called with ``images=None``, so PPL becomes
+    ``P(caption | text-prompt only)``, the language-prior baseline.
     """
     if with_image:
         content = [{"type": "image"}, {"type": "text", "text": instruction}]
@@ -173,394 +172,240 @@ def pil_to_oga_image(img: Image.Image, image_size: int) -> Tuple[og.Images, str]
 
 
 # ----------------------------------------------------------------------------
+# Scoring helpers
+# ----------------------------------------------------------------------------
+
+@dataclass
+class PreparedSample:
+    """Tokenised (image, caption) pair.
+
+    ``prompt_inputs`` is the processor bundle for the prompt alone (image
+    tensors plus prompt ``input_ids``). ``full_ids`` is prompt + caption, so
+    ``full_ids[prompt_len:]`` are the scored caption tokens.
+    """
+    prompt_inputs: object
+    full_ids: np.ndarray
+    prompt_len: int
+
+    @property
+    def full_len(self) -> int:
+        return int(self.full_ids.shape[0])
+
+    @property
+    def target_len(self) -> int:
+        return self.full_len - self.prompt_len
+
+
+def _logit_rows(raw) -> np.ndarray:
+    rows = np.asarray(raw)
+    return rows[0] if rows.ndim == 3 else rows
+
+
+def _token_nll(row, target_id: int) -> float:
+    logits = torch.from_numpy(np.asarray(row, dtype=np.float32)).unsqueeze(0)
+    label = torch.tensor([int(target_id)], dtype=torch.int64)
+    return float(torch.nn.functional.cross_entropy(logits, label).item())
+
+
+def _inputs_with_ids(prompt_inputs, token_ids) -> "og.NamedTensors":
+    """Same image tensors, with ``input_ids`` replaced by ``token_ids``.
+
+    Caption tokens sit after the image placeholders, so the vision tensors
+    from the prompt bundle stay valid. One ``set_inputs`` of this bundle is a
+    single prefill of that prefix.
+    """
+    named = og.NamedTensors()
+    ids = np.asarray(token_ids, dtype=np.int32).reshape(1, -1)
+    for key in prompt_inputs.keys():
+        named[key] = ids if key == "input_ids" else prompt_inputs[key]
+    return named
+
+
+def _pair_image_index(mode: str, i: int, n: int) -> Optional[int]:
+    """Index of the image paired with caption ``i``; None means no image.
+
+    The caption is always sample i's own caption; only the image is rotated.
+    """
+    if mode == "match":
+        return i
+    if mode == "shuffle":
+        # A constant non-zero offset is reproducible and never pairs a caption
+        # with its own image (for n >= 2).
+        return (i + 1) % n
+    if mode == "none":
+        return None
+    raise ValueError(f"unknown mode {mode!r}")
+
+
+# ----------------------------------------------------------------------------
 # Per-sample PPL computation
 # ----------------------------------------------------------------------------
 
-_DISABLE_REWIND_ENV = "HIPDNN_PPL_DISABLE_REWIND"
-_rewind_fallback_logged = False
+class VlmPplScorer:
+    """Teacher-forced caption NLL for one model.
 
-
-def _rewind_disabled_by_env() -> bool:
-    val = os.environ.get(_DISABLE_REWIND_ENV, "").strip().lower()
-    return val not in ("", "0", "false", "no", "off")
-
-
-def _log_rewind_fallback(reason: str) -> None:
-    """Tell the user (once per process) why rewind_to is not used."""
-    global _rewind_fallback_logged
-    if _rewind_fallback_logged:
-        return
-    _rewind_fallback_logged = True
-    print(f"[perplexity_vlm] Not using rewind_to: {reason}")
-    print("[perplexity_vlm] Falling back to rewind-free incremental teacher "
-          "forcing (same NLLs; one extra vision encoder + prompt prefill per "
-          "sample).")
-
-
-def compute_sample_nll(
-    model: og.Model,
-    tokenizer: og.Tokenizer,
-    processor,
-    template_str: Optional[str],
-    img: Optional[Image.Image],
-    caption: str,
-    instruction: str,
-    image_size: int,
-    max_length: int,
-    verbose: bool,
-    topk: int = 0,
-) -> Optional[Tuple[float, int, dict]]:
-    """Run one (image, caption) sample. Returns (sum_nll, num_target_tokens).
-
-    ``img`` semantics control which of the three visual-neglect modes runs:
-      - ``img is not None`` -> standard image-conditioned path (modes ``match``
-        and ``shuffle``; the caller decides which image is paired with which
-        caption).
-      - ``img is None``     -> text-only path. ``messages`` are built without
-        an image marker, ``processor(...)`` is called with ``images=None``,
-        and the vision encoder + image-feature scatter are bypassed entirely.
-
-    Returns None on a recoverable error (per-sample failure should not abort
-    the whole run; we just skip the sample and continue).
+    The graph kind (pruned vs full logits) is fixed per model, so it is probed
+    on the first sample and reused.
     """
-    text_only = img is None
-    if not text_only:
-        oga_image, tmp_path = pil_to_oga_image(img, image_size)
-    else:
-        oga_image = None
-        tmp_path = None
 
-    try:
-        # Build prompt with (or without) image placeholder + instruction.
-        # add_generation_prompt appends the assistant role-open turn so the
-        # model is "ready to answer" — that's where the caption tokens will
-        # logically be appended.
-        messages = build_messages(instruction, with_image=not text_only)
-        if template_str is not None:
-            prompt_str = tokenizer.apply_chat_template(
-                json.dumps(messages),
-                template_str=template_str,
-                add_generation_prompt=True,
-            )
-        else:
-            prompt_str = tokenizer.apply_chat_template(
-                json.dumps(messages),
-                add_generation_prompt=True,
-            )
+    def __init__(self, model_dir: str, instruction: str, image_size: int,
+                 max_length: int, verbose: bool):
+        self.instruction = instruction
+        self.image_size = image_size
+        self.max_length = max_length
+        self.verbose = verbose
+        self.model = og.Model(model_dir)
+        self.tokenizer = og.Tokenizer(self.model)
+        self.processor = self.model.create_multimodal_processor()
+        self.template_str = load_chat_template(model_dir)
+        self._pruned: Optional[bool] = None
+        if verbose:
+            print(f"Model loaded; chat_template "
+                  f"{'found' if self.template_str else 'missing'}")
 
-        # Dry run: tokenize prompt-only (with the image, if present) to learn
-        # how many tokens the prompt actually occupies. With an image, the
-        # processor expands the ``<|image_pad|>`` placeholder into N image
-        # tokens (N depends on ``image_grid_thw``); without one, the prompt is
-        # plain text. Either way ``prompt_len`` is the boundary that label-mask
-        # math depends on, and it MUST be measured per-mode rather than reused
-        # across modes — the text-only prompt is shorter by ~768 tokens.
-        # OGA NamedTensors values are wrapped in ``onnxruntime_genai.Tensor``;
-        # use ``.as_numpy()`` to get the underlying ndarray.
-        prompt_inputs = processor(prompt_str, images=oga_image)
+    def score(self, img: Optional[Image.Image],
+              caption: str) -> Optional[Tuple[float, int]]:
+        """Return (sum_nll, num_caption_tokens), or None to skip the sample.
+
+        ``img=None`` runs the text-only prompt (``--mode none``).
+        """
+        oga_image, tmp_path = None, None
+        if img is not None:
+            oga_image, tmp_path = pil_to_oga_image(img, self.image_size)
+        try:
+            sample = self._prepare(oga_image, caption)
+            if sample is None:
+                return None
+            if self._pruned is None:
+                self._pruned = self._probe_pruned(sample)
+                kind = "PRUNED (last-position only)" if self._pruned else "FULL sequence"
+                print(f"[detect] logits mode: {kind}")
+            if self.verbose:
+                print(f"  [teacher-forced] full_len={sample.full_len}, "
+                      f"prompt_len={sample.prompt_len}, "
+                      f"target_len={sample.target_len}, "
+                      f"path={'pruned' if self._pruned else 'full'}")
+            sum_nll = (self._score_pruned if self._pruned else self._score_full)(sample)
+            if sum_nll is None:
+                if self.verbose:
+                    print("  [skip] non-finite NLL")
+                return None
+            return sum_nll, sample.target_len
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    def _prepare(self, oga_image, caption: str) -> Optional[PreparedSample]:
+        # add_generation_prompt appends the assistant role-open turn, which is
+        # where the caption tokens logically continue.
+        messages = build_messages(self.instruction, with_image=oga_image is not None)
+        template_kwargs = {"add_generation_prompt": True}
+        if self.template_str is not None:
+            template_kwargs["template_str"] = self.template_str
+        prompt_str = self.tokenizer.apply_chat_template(
+            json.dumps(messages), **template_kwargs)
+
+        # The processor expands the image placeholder into one token per patch,
+        # so prompt_len must be measured from its output.
+        prompt_inputs = self.processor(prompt_str, images=oga_image)
         prompt_ids = prompt_inputs["input_ids"].as_numpy().reshape(-1)
         prompt_len = int(prompt_ids.shape[0])
 
-        # Full sequence: prompt + caption. The processor will tokenize the
-        # caption as plain text appended after the assistant role-open marker.
-        full_str = prompt_str + caption
-        full_inputs = processor(full_str, images=oga_image)
-        full_ids = full_inputs["input_ids"].as_numpy().reshape(-1)
+        full_ids = self.processor(
+            prompt_str + caption, images=oga_image)["input_ids"].as_numpy().reshape(-1)
         full_len = int(full_ids.shape[0])
 
-        target_len = full_len - prompt_len
-        if target_len <= 0:
-            if verbose:
-                print(f"  [skip] caption tokenized to 0 new tokens "
-                      f"(prompt_len={prompt_len}, full_len={full_len})")
-            return None
-        if full_len + 1 > max_length:
-            if verbose:
+        if full_len + 1 > self.max_length:
+            if self.verbose:
                 print(f"  [skip] full_len={full_len} exceeds max_length="
-                      f"{max_length}; raise --max_length to evaluate this sample")
+                      f"{self.max_length}; raise --max_length to evaluate this sample")
             return None
 
-        # Sanity: prompt_ids must be a strict prefix of full_ids. If not, the
-        # caption text changed how the prompt was tokenised (BPE merges across
-        # the boundary). Fall back to the longest common prefix.
+        # The prompt must be a strict prefix of prompt+caption. If BPE merged
+        # across the boundary, score from the longest common prefix instead.
         if not np.array_equal(full_ids[:prompt_len], prompt_ids):
-            min_len = min(prompt_len, full_len)
             common = 0
-            for k in range(min_len):
-                if full_ids[k] != prompt_ids[k]:
+            for a, b in zip(full_ids, prompt_ids):
+                if a != b:
                     break
                 common += 1
-            if verbose:
+            if self.verbose:
                 print(f"  [warn] prompt+caption tokenization not strictly "
                       f"prefix-extending (common={common} of {prompt_len}); "
                       f"using common as boundary")
             prompt_len = common
-            target_len = full_len - prompt_len
-            if target_len <= 0:
-                return None
 
-        # Run prefill via the multimodal generator. set_inputs binds image
-        # features + token ids; generate_next_token triggers the prefill
-        # compute (and a one-step decode whose sampling we ignore — we only
-        # want the prefill logits cached behind get_output("logits")).
-        params = og.GeneratorParams(model)
-        # Force the search horizon to fit our sequence; the value baked in
-        # genai_config.json (e.g. 384) may be too tight for longer captions.
+        if full_len - prompt_len <= 0:
+            if self.verbose:
+                print(f"  [skip] caption tokenized to 0 new tokens "
+                      f"(prompt_len={prompt_len}, full_len={full_len})")
+            return None
+        return PreparedSample(prompt_inputs, full_ids, prompt_len)
+
+    def _generator(self, full_len: int):
+        params = og.GeneratorParams(self.model)
+        # The search horizon in genai_config.json can be shorter than the image
+        # prompt. It only sizes the KV buffer; scoring never samples.
         params.set_search_options(
             do_sample=False,
             top_k=1,
-            max_length=max(max_length, full_len + 1),
-            min_length=full_len,  # prevent early stop before prefill finishes
+            max_length=max(self.max_length, full_len + 1),
+            min_length=full_len,
         )
+        return og.Generator(self.model, params)
 
-        # We don't yet know if the model's text decoder graph emits all-position
-        # logits ([B, T, V]) or only the last-position ([B, 1, V]) — the former
-        # is the canonical HF export; the latter is the DML-optimized export
-        # that pre-applies the "select last token" inside the graph for cheaper
-        # autoregressive decode. Try the all-position path first; fall back to
-        # a teacher-forced per-token decode loop if logits seq dim is short.
-        # ``full_inputs`` (set on prompt_inputs) is the prompt-only multimodal
-        # input — its image features only need to be bound once; subsequent
-        # decode steps reuse the KV cache.
-        generator = og.Generator(model, params)
-        sum_nll: float
+    def _probe_pruned(self, sample: PreparedSample) -> bool:
+        """True when a multi-token prefill still returns a single logit row.
+
+        Same test as ``perplexity.detect_pruned_logits``: the prune-logits gather
+        keeps only the last position, so the sequence dim is 1 instead of the
+        input length.
+        """
+        n_in = int(sample.prompt_inputs["input_ids"].as_numpy().size)
+        generator = self._generator(n_in)
         try:
-            # Bind image features + prompt token ids. Do NOT use ``full_inputs``
-            # (which contains the caption appended to the prompt) because we
-            # need to inject caption tokens one at a time in the per-token
-            # path — and the all-position path doesn't care whether the caption
-            # was bound at set_inputs time or appended via append_tokens, since
-            # in both cases the graph runs the same prefill compute.
-            generator.set_inputs(prompt_inputs)
-            # Append the caption tokens so the prefill covers full_len. The
-            # all-position path consumes this full prefill directly; the
-            # last-position path only uses it to detect the logits seq dim,
-            # then re-prefills per target position below (rewind-free).
-            caption_ids = full_ids[prompt_len:].astype(np.int32).tolist()
-            generator.append_tokens(caption_ids)
-            generator.generate_next_token()  # triggers prefill
-
-            logits_raw = generator.get_output("logits")
-            logits_all = np.asarray(logits_raw)
-            if logits_all.ndim == 3:
-                logits_all = logits_all[0]
-            if logits_all.ndim != 2:
-                if verbose:
-                    print(f"  [skip] unexpected logits shape "
-                          f"{logits_all.shape}; expected [T,V]")
-                return None
-
-            if logits_all.shape[0] >= full_len:
-                # All-position-logits path (canonical HF export). Standard
-                # shift: logits[t] predicts token at position t+1. Loss is
-                # computed only on positions where the target is a CAPTION
-                # token, i.e. shift_labels[i] = full_ids[i+1] with i in
-                # [prompt_len-1, full_len-1).
-                logits_slice = logits_all[:full_len].astype(np.float32)
-
-                if verbose:
-                    target_logits = logits_slice[prompt_len - 1: full_len - 1]
-                    n_bad = int(np.sum(~np.isfinite(target_logits)))
-                    if n_bad > 0:
-                        print(f"  [diag] {n_bad} non-finite logit values in "
-                              f"target window (shape={target_logits.shape}); "
-                              f"this sample will yield NaN PPL")
-
-                # Per-target-token NLL + top-1 prediction. The row that
-                # predicts target[j] = full_ids[prompt_len + j] is row
-                # (prompt_len - 1 + j) of the all-position logits. Computing
-                # per token (rather than one masked sum) is mathematically
-                # identical for the aggregate NLL, but additionally lets the
-                # caller dump a per-position EP-vs-CPU comparison (top-1
-                # agreement + per-token NLL delta) — a finer correctness
-                # signal than aggregate PPL alone.
-                tgt_rows = logits_slice[prompt_len - 1: full_len - 1]      # [target_len, V]
-                tgt_ids_np = full_ids[prompt_len:full_len].astype(np.int64)  # [target_len]
-                lt = torch.from_numpy(tgt_rows)
-                lbl = torch.from_numpy(tgt_ids_np)
-                per_tok = torch.nn.functional.cross_entropy(
-                    lt, lbl, reduction="none")
-                sum_nll = float(per_tok.sum().item())
-                tgt_ids_out = tgt_ids_np.tolist()
-                per_tok_out = [float(x) for x in per_tok.tolist()]
-                top1_out = [int(x) for x in np.argmax(tgt_rows, axis=1).tolist()]
-                # Optional top-k / logit decomposition for the flip / max-dev
-                # investigation. NLL = lse - target_logit, so dumping both lets
-                # the comparison split the EP-vs-CPU NLL delta into a logit-
-                # value component and a normalization (logsumexp) component.
-                target_logit_out, lse_out, topk_ids_out, topk_logits_out = [], [], [], []
-                if topk and topk > 0:
-                    lse = torch.logsumexp(lt, dim=-1)
-                    tlog = lt.gather(1, lbl.view(-1, 1)).squeeze(1)
-                    kk = min(topk, lt.shape[1])
-                    tvals, tids = torch.topk(lt, kk, dim=-1)
-                    lse_out = [float(x) for x in lse.tolist()]
-                    target_logit_out = [float(x) for x in tlog.tolist()]
-                    topk_ids_out = [[int(x) for x in row] for row in tids.tolist()]
-                    topk_logits_out = [[float(x) for x in row] for row in tvals.tolist()]
-            else:
-                # Last-position-only path. The decoder emits logits [B, 1, V] =
-                # P(next | prefix), so a single full-length prefill only yields
-                # the final position's logits, not the intermediate per-target
-                # logits that PPL needs. They are recovered with teacher-forced
-                # single-token decode steps, using one of two strategies:
-                #
-                #   * can_rewind=True: rewind the probe generator back into the
-                #     prompt and replay the target tokens one at a time
-                #     (rewind_to + append_tokens + generate_next_token), reusing
-                #     the KV cache that is already filled.
-                #   * can_rewind=False: for models whose OGA type rejects
-                #     rewind_to, use a fresh generator with incremental teacher
-                #     forcing: set_inputs(prompt) leaves logits = P(? | prompt)
-                #     = prediction for target[0]; append_tokens([target[j-1]])
-                #     leaves logits = P(? | prompt + target[:j]) = prediction
-                #     for target[j]. No generate_next_token and no rewind_to;
-                #     costs one extra vision encoder + prompt prefill.
-                #
-                # Both strategies score the same set of target-position NLLs.
-                loss_fct = torch.nn.CrossEntropyLoss(reduction="sum")
-                sum_nll = 0.0
-                # Per-token records (parallel to the all-position path) so the
-                # caller can dump an EP-vs-CPU top-1 / NLL comparison.
-                tgt_ids_out = []
-                per_tok_out = []
-                top1_out = []
-                target_logit_out, lse_out, topk_ids_out, topk_logits_out = [], [], [], []
-
-                def _record_step(row_t, tid, snll):
-                    # row_t: torch tensor [V] of logits for this target position.
-                    tgt_ids_out.append(int(tid))
-                    per_tok_out.append(float(snll))
-                    top1_out.append(int(row_t.argmax().item()))
-                    if topk and topk > 0:
-                        lse_out.append(float(torch.logsumexp(row_t, dim=-1).item()))
-                        target_logit_out.append(float(row_t[tid].item()))
-                        kk = min(topk, row_t.shape[0])
-                        tv, ti = torch.topk(row_t, kk)
-                        topk_ids_out.append([int(x) for x in ti.tolist()])
-                        topk_logits_out.append([float(x) for x in tv.tolist()])
-
-                # rewind_to raises a catchable error for model types OGA marks
-                # as unsupported. A rewind that OGA accepts but that later
-                # aborts natively on the next forward pass (e.g. gemma4
-                # multimodal on amdgpu) cannot be caught, so such setups must
-                # opt out via HIPDNN_PPL_DISABLE_REWIND.
-                if _rewind_disabled_by_env():
-                    can_rewind = False
-                    _log_rewind_fallback(
-                        f"disabled by {_DISABLE_REWIND_ENV}="
-                        f"{os.environ.get(_DISABLE_REWIND_ENV)}")
-                else:
-                    try:
-                        generator.rewind_to(prompt_len)
-                        can_rewind = True
-                    except Exception as e:
-                        can_rewind = False
-                        _log_rewind_fallback(
-                            f"rewind_to is not supported for this model: {e}")
-
-                if verbose:
-                    strategy = ("rewind + per-token replay" if can_rewind
-                                else "incremental teacher forcing (rewind-free)")
-                    print(f"  [last-pos-only] full_len={full_len}, "
-                          f"prompt_len={prompt_len}, target_len={target_len}; "
-                          f"can_rewind={can_rewind}, {strategy}")
-
-                if can_rewind:
-                    # After rewind_to(prompt_len - 1), appending the last prompt
-                    # token runs one decode step whose logits are
-                    # P(? | prompt) = the prediction for target[0].
-                    generator.rewind_to(prompt_len - 1)
-                    last_prompt_tok = int(full_ids[prompt_len - 1])
-                    generator.append_tokens([last_prompt_tok])
-                    generator.generate_next_token()
-                    logits_step = np.asarray(generator.get_output("logits"))
-                    if logits_step.ndim == 3:
-                        logits_step = logits_step[0]
-                    logits_t = torch.from_numpy(logits_step.astype(np.float32))
-
-                    target_id = int(full_ids[prompt_len])
-                    step_logits = logits_t[-1:, :]
-                    step_label = torch.tensor([target_id], dtype=torch.int64)
-                    step_nll = loss_fct(step_logits, step_label).item()
-                    if not np.isfinite(step_nll):
-                        if verbose:
-                            print(f"  [diag] non-finite NLL at decode step 0 "
-                                  f"(target_id={target_id}); aborting sample")
-                        return None
-                    sum_nll += step_nll
-                    _record_step(step_logits[-1], target_id, step_nll)
-
-                    # Steps k=1..target_len-1: append target[k-1], decode 1 step,
-                    # logits = P(? | prompt + target[:k]) = prediction for target[k].
-                    for k in range(1, target_len):
-                        prev_target = int(full_ids[prompt_len + k - 1])
-                        target_k = int(full_ids[prompt_len + k])
-                        # Drop the sampled tail so the KV cache stays in
-                        # lock-step with the teacher-forced sequence.
-                        generator.rewind_to(prompt_len + k - 1)
-                        generator.append_tokens([prev_target])
-                        generator.generate_next_token()
-                        logits_step = np.asarray(generator.get_output("logits"))
-                        if logits_step.ndim == 3:
-                            logits_step = logits_step[0]
-                        logits_t = torch.from_numpy(logits_step.astype(np.float32))
-                        step_logits = logits_t[-1:, :]
-                        step_label = torch.tensor([target_k], dtype=torch.int64)
-                        step_nll = loss_fct(step_logits, step_label).item()
-                        if not np.isfinite(step_nll):
-                            if verbose:
-                                print(f"  [diag] non-finite NLL at decode step "
-                                      f"{k} (target_id={target_k}); aborting sample")
-                            return None
-                        sum_nll += step_nll
-                        _record_step(step_logits[-1], target_k, step_nll)
-                else:
-                    tf_gen = og.Generator(model, params)
-                    try:
-                        tf_gen.set_inputs(prompt_inputs)  # prefill prompt (vision once)
-                        for j in range(target_len):
-                            if j > 0:
-                                tf_gen.append_tokens(
-                                    [int(full_ids[prompt_len + j - 1])])
-                            logits_step = np.asarray(tf_gen.get_output("logits"))
-                            if logits_step.ndim == 3:
-                                logits_step = logits_step[0]
-                            # Final-position logits = prediction for target[j].
-                            step_logits = torch.from_numpy(
-                                logits_step[-1:, :].astype(np.float32))
-                            target_j = int(full_ids[prompt_len + j])
-                            step_label = torch.tensor([target_j], dtype=torch.int64)
-                            step_nll = loss_fct(step_logits, step_label).item()
-                            if not np.isfinite(step_nll):
-                                if verbose:
-                                    print(f"  [diag] non-finite NLL at target step "
-                                          f"{j} (target_id={target_j}); aborting sample")
-                                return None
-                            sum_nll += step_nll
-                            _record_step(step_logits[-1], target_j, step_nll)
-                    finally:
-                        del tf_gen
+            generator.set_inputs(sample.prompt_inputs)
+            rows = _logit_rows(generator.get_output("logits"))
         finally:
             del generator
+        return int(rows.shape[0]) < n_in
 
-        rec = {
-            "target_ids": tgt_ids_out,
-            "target_nll": per_tok_out,
-            "top1_ids": top1_out,
-        }
-        if topk and topk > 0:
-            rec["target_logit"] = target_logit_out
-            rec["lse"] = lse_out
-            rec["topk_ids"] = topk_ids_out
-            rec["topk_logits"] = topk_logits_out
-        return sum_nll, target_len, rec
-    finally:
-        if tmp_path is not None:
+    def _score_pruned(self, sample: PreparedSample) -> Optional[float]:
+        """One prefill per caption position: image + prompt + caption[:j]."""
+        sum_nll = 0.0
+        for j in range(sample.target_len):
+            generator = self._generator(sample.full_len)
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                generator.set_inputs(_inputs_with_ids(
+                    sample.prompt_inputs, sample.full_ids[:sample.prompt_len + j]))
+                row = _logit_rows(generator.get_output("logits"))[-1]
+            finally:
+                del generator
+            nll = _token_nll(row, sample.full_ids[sample.prompt_len + j])
+            if not np.isfinite(nll):
+                return None
+            sum_nll += nll
+        return sum_nll
+
+    def _score_full(self, sample: PreparedSample) -> Optional[float]:
+        """One prefill of prompt+caption; row t predicts token t+1."""
+        generator = self._generator(sample.full_len)
+        try:
+            generator.set_inputs(_inputs_with_ids(sample.prompt_inputs, sample.full_ids))
+            rows = _logit_rows(generator.get_output("logits"))
+        finally:
+            del generator
+        sum_nll = 0.0
+        for j in range(sample.target_len):
+            nll = _token_nll(rows[sample.prompt_len + j - 1],
+                             sample.full_ids[sample.prompt_len + j])
+            if not np.isfinite(nll):
+                return None
+            sum_nll += nll
+        return sum_nll
 
 
 # ----------------------------------------------------------------------------
@@ -573,128 +418,38 @@ def main(args):
 
     if args.verbose:
         print("Loading dataset ...")
-    if args.dataset == "lmms-lab/flickr30k" and args.split == "test":
-        samples = load_flickr30k_test(args.limit)
-    else:
-        # Generic HF path for future datasets — kept simple on purpose.
-        from datasets import load_dataset
-        ds = load_dataset(args.dataset, split=args.split)
-        samples = []
-        for ex in ds:
-            if len(samples) >= args.limit:
-                break
-            img = ex.get("image", None)
-            cap = ex.get("caption", None)
-            if isinstance(cap, list) and cap:
-                cap = cap[0]
-            if not isinstance(img, Image.Image) or not isinstance(cap, str):
-                continue
-            samples.append((img.convert("RGB"), cap.strip()))
-        if not samples:
-            raise RuntimeError(f"No usable samples from {args.dataset}/{args.split}")
+    samples = load_samples(args.dataset, args.split, args.limit)
     if args.verbose:
         print(f"Loaded {len(samples)} samples")
-
-    if args.verbose:
         print("Loading model (this may JIT-compile EPs on first call) ...")
-    model = og.Model(args.model)
-    tokenizer = og.Tokenizer(model)
-    processor = model.create_multimodal_processor()
-    template_str = load_chat_template(args.model)
-    if args.verbose:
-        print(f"Model loaded; chat_template "
-              f"{'found' if template_str else 'missing'}")
+
+    scorer = VlmPplScorer(args.model, args.instruction, args.image_size,
+                          args.max_length, args.verbose)
 
     total_nll = 0.0
     total_tokens = 0
     skipped = 0
     per_sample_ppl: List[float] = []
 
-    # Optional per-token dump for the EP-vs-CPU comparison driver
-    # (compare_vlm_ep_cpu.py). One JSON object per evaluated sample carrying
-    # the target token ids, per-token NLL, and per-token top-1 prediction.
-    dump_path = getattr(args, "dump_jsonl", None)
-    dump_fh = open(dump_path, "w", encoding="utf-8") if dump_path else None
-
-    # ``mode`` chooses which image (if any) is paired with each caption.
-    # The CAPTION is always the canonical caption[0] of sample i — only the
-    # IMAGE is rotated. This isolates the visual-conditioning effect.
     n = len(samples)
-    if args.mode == "match":
-        pair_img_for = lambda i: samples[i][0]
-    elif args.mode == "shuffle":
-        # Pair caption_i with image_(i+1) mod N. A constant non-zero offset
-        # is reproducible and guarantees img ≠ caption's source for every
-        # sample (so long as N ≥ 2).
-        pair_img_for = lambda i: samples[(i + 1) % n][0]
-    elif args.mode == "none":
-        pair_img_for = lambda i: None  # text-only path inside compute_sample_nll
-    else:
-        raise ValueError(f"unknown mode {args.mode!r}")
-    if args.verbose:
-        print(f"Visual-grounding mode: {args.mode}")
-
-    # Optional sample-index filter: only evaluate the listed dataset indices
-    # (keeps the original index numbering so dumps align with a full run).
-    selected = None
-    sidx = getattr(args, "sample_indices", None)
-    if sidx:
-        selected = [int(x) for x in str(sidx).split(",") if x.strip() != ""]
-    indices = selected if selected is not None else list(range(len(samples)))
-    topk = int(getattr(args, "dump_topk", 0) or 0)
-
-    for i in indices:
-        if i < 0 or i >= len(samples):
-            if args.verbose:
-                print(f"  [skip] sample index {i} out of range "
-                      f"(have {len(samples)} samples)")
-            continue
+    for i in range(n):
         caption = samples[i][1]
         if args.verbose:
-            print(f"[{i + 1}/{len(samples)}] caption={caption[:60]!r}")
-        result = compute_sample_nll(
-            model=model,
-            tokenizer=tokenizer,
-            processor=processor,
-            template_str=template_str,
-            img=pair_img_for(i),
-            caption=caption,
-            instruction=args.instruction,
-            image_size=args.image_size,
-            max_length=args.max_length,
-            verbose=args.verbose,
-            topk=topk,
-        )
+            print(f"[{i + 1}/{n}] caption={caption[:60]!r}")
+        image_idx = _pair_image_index(args.mode, i, n)
+        img = None if image_idx is None else samples[image_idx][0]
+        result = scorer.score(img, caption)
         if result is None:
             skipped += 1
             continue
-        sum_nll, n_target, rec = result
-        # Drop samples whose NLL came out non-finite (NaN/Inf). Causes seen so
-        # far are: an Inf logit at some target position (rare numeric edge in
-        # the prefill) or token-shift mis-alignment past EOS. A single NaN
-        # would otherwise corrupt total_nll, making the final PPL == NaN.
-        if not np.isfinite(sum_nll):
-            if args.verbose:
-                print(f"  [skip] sum_nll non-finite ({sum_nll}); "
-                      f"n_target={n_target}")
-            skipped += 1
-            continue
+        sum_nll, n_target = result
         total_nll += sum_nll
         total_tokens += n_target
-        sample_ppl = float(np.exp(sum_nll / max(n_target, 1)))
+        sample_ppl = float(np.exp(sum_nll / n_target))
         per_sample_ppl.append(sample_ppl)
-        if dump_fh is not None:
-            row = {"index": i, "target_len": int(n_target),
-                   "sum_nll": float(sum_nll)}
-            row.update(rec)
-            dump_fh.write(json.dumps(row) + "\n")
-            dump_fh.flush()
         if args.verbose:
             print(f"  sum_nll={sum_nll:.4f} n_target={n_target} "
                   f"sample_ppl={sample_ppl:.4f}")
-
-    if dump_fh is not None:
-        dump_fh.close()
 
     if total_tokens == 0:
         print("ERROR: every sample was skipped; cannot compute PPL", file=sys.stderr)
@@ -705,16 +460,14 @@ def main(args):
 
     # The summary block doubles as the parser target for the wrapper.
     print("=" * 60)
-    n_attempted = len(indices)
-    print(f"Samples evaluated : {n_attempted - skipped}/{n_attempted}")
+    print(f"Samples evaluated : {n - skipped}/{n}")
     print(f"Skipped           : {skipped}")
     print(f"Total target tokens: {total_tokens}")
     print(f"Average NLL       : {avg_nll:.6f}")
-    if per_sample_ppl:
-        per = np.array(per_sample_ppl, dtype=np.float64)
-        print(f"Per-sample PPL    : "
-              f"min={per.min():.4f} mean={per.mean():.4f} "
-              f"median={np.median(per):.4f} max={per.max():.4f}")
+    per = np.array(per_sample_ppl, dtype=np.float64)
+    print(f"Per-sample PPL    : "
+          f"min={per.min():.4f} mean={per.mean():.4f} "
+          f"median={np.median(per):.4f} max={per.max():.4f}")
     # IMPORTANT: `Perplexity: <value>` is the line tests/ppl.py /
     # tests/ppl_vlm.py regex-parses. Keep this format stable.
     print(f"Perplexity: {ppl:.6f}")
@@ -722,7 +475,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        argument_default=argparse.SUPPRESS,
         description="Conditional VLM perplexity over an image+caption dataset",
     )
     parser.add_argument("-m", "--model", type=str, required=True,
@@ -744,19 +496,6 @@ if __name__ == "__main__":
                              "~800 image tokens); raise for larger images or "
                              "longer captions.")
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
-    parser.add_argument("--dump-jsonl", dest="dump_jsonl", type=str, default=None,
-                        help="Write per-sample per-token data (target_ids, "
-                             "target_nll, top1_ids) as JSONL for the EP-vs-CPU "
-                             "comparison driver (compare_vlm_ep_cpu.py).")
-    parser.add_argument("--dump-topk", dest="dump_topk", type=int, default=0,
-                        help="If >0, also dump per-target-position top-K "
-                             "(token id + logit), target_logit and logsumexp "
-                             "for logit-level EP-vs-CPU divergence analysis.")
-    parser.add_argument("--sample-indices", dest="sample_indices", type=str,
-                        default=None,
-                        help="Comma-separated dataset indices to evaluate "
-                             "(e.g. '40,16,6'). Others are skipped; original "
-                             "index numbering is preserved in the dump.")
     parser.add_argument("--mode", type=str, default="match",
                         choices=["match", "shuffle", "none"],
                         help="Visual-grounding mode. 'match': caption_i paired "
@@ -766,26 +505,7 @@ if __name__ == "__main__":
                              "(language-prior baseline). Run all three to "
                              "compute PPL_shuf/PPL_match and PPL_none/PPL_match "
                              "ratios - both should be > 1 for a healthy VLM.")
-    # accept (and ignore) -d/--device for symmetry with perplexity.py callers
+    # accept (and ignore) --device for symmetry with perplexity.py callers
     parser.add_argument("--device", type=str, required=False, default="cpu",
                         choices=["cpu", "aie", "gpu"], help="(ignored)")
-    args = parser.parse_args()
-
-    # argparse SUPPRESS leaves missing optional args off the namespace; rebind
-    # the defaults we always want present.
-    for k, v in [
-        ("dataset", "lmms-lab/flickr30k"),
-        ("split", "test"),
-        ("limit", 50),
-        ("instruction", "Describe this image briefly."),
-        ("image_size", 896),
-        ("max_length", 1024),
-        ("verbose", False),
-        ("mode", "match"),
-        ("dump_jsonl", None),
-        ("dump_topk", 0),
-        ("sample_indices", None),
-    ]:
-        if not hasattr(args, k):
-            setattr(args, k, v)
-    main(args)
+    main(parser.parse_args())
