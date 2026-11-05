@@ -193,6 +193,8 @@ Notes:
 | `stride` | `256` | sliding-window stride; only applies to the pruned (last-position-only logits) path (full-logits models ignore it). |
 | `bos` | `auto` | sequence-start prefix for every window. `auto` prepends whatever the OGA tokenizer adds at the start of a sequence when special tokens are enabled (e.g. BOS), and nothing for tokenizers that add none; `never` disables it (legacy behaviour). `seq_len` counts corpus tokens only, so the model input is `seq_len` plus the prefix length (the corpus slicing and scored labels are the same with and without the prefix). The corpus is always encoded with the OGA tokenizer. |
 
+Besides `perplexity`, a PPL run records the prefix its windows carried: `start_prefix_mode` (`auto`/`never`), `start_prefix_len` and `start_prefix_ids` (space-separated token ids, empty when there is no prefix). Compare these first when a baseline shifts.
+
 ### MMLU (multi-subject multiple choice)
 
 No extra required parameters; the sequence length comes from `seq_lengths`.

@@ -73,6 +73,15 @@ class PPLTest(BaseTest):
             match = re.search(r"Perplexity:\s+([\d.]+)", stdout)
             if match:
                 metrics["perplexity"] = float(match.group(1))
+                # Record which start prefix the windows carried so a baseline
+                # shift between runs can be traced to the prefix.
+                prefix = re.search(
+                    r"\[start-prefix\]\s+mode=(\w+)\s+source=\w+\s+ids=\[([^\]]*)\]", stdout)
+                if prefix:
+                    ids = [i.strip() for i in prefix.group(2).split(",") if i.strip()]
+                    metrics["start_prefix_mode"] = prefix.group(1)
+                    metrics["start_prefix_len"] = len(ids)
+                    metrics["start_prefix_ids"] = " ".join(ids)
             else:
                 return TestResult(
                     success=False, metrics={}, stdout=stdout, stderr=stderr,

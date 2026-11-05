@@ -101,12 +101,14 @@ def run_full_logits_ppl(model, params, test_enc, seqlen, prefix_ids, nsamples_fr
             generator = og.Generator(model, params)
             generator.append_tokens(window)
             logits = torch.tensor(generator.get_output("logits")[0], dtype=torch.float32)
-            # With chunked prefill, get_output("logits") holds only the last
-            # chunk's rows (earlier chunks are overwritten), so the row count
-            # would silently fall short and mis-slice the scored rows.
-            if logits.shape[0] < seqlen:
+            # A full-logits graph returns one row per input token. With chunked
+            # prefill, get_output("logits") holds only the last chunk's rows
+            # (earlier chunks are overwritten), so any other row count means the
+            # scored rows would be mis-sliced.
+            if logits.shape[0] != len(window):
                 raise RuntimeError(
-                    f"full-logits PPL needs {seqlen} logits rows per window but the "
+                    f"full-logits PPL needs {len(window)} logits rows per window "
+                    f"({seqlen} corpus tokens + {len(prefix_ids)} prefix) but the "
                     f"model returned {logits.shape[0]}; prefill chunking "
                     f"(search.chunk_size) keeps only the last chunk's logits")
             # Rows [-seqlen:-1] sit on chunk[0..seqlen-2] and predict chunk[1:],
