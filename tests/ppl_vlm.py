@@ -1,8 +1,8 @@
 """PPL_VLM (VLM Perplexity) test wrapper.
 
 Calls tests/PPL/perplexity_vlm.py as a subprocess. Forwards VLM-specific
-test_params (dataset / split / limit / image_size / max_length / instruction)
-to the runner CLI. VLM PPL does not use ``seq_len`` for chunking: one
+test_params (dataset / split / nsamples / segments / exact / image_size /
+max_length / instruction) to the runner CLI. VLM PPL does not use ``seq_len`` for chunking: one
 (image, caption) pair per sample, not a fixed-length text chunk.
 
 The VLM ``test_config`` repurposes ``seq_lengths`` as a list of provider
@@ -29,7 +29,15 @@ class PPLVLMTest(BaseTest):
 
         dataset = test_params.get("dataset", "lmms-lab/flickr30k")
         split = test_params.get("split", "test")
-        limit = int(test_params.get("limit", 50))
+        if "limit" in test_params:
+            return TestResult(
+                success=False, metrics={}, stdout="", stderr="",
+                error_msg="PPL_VLM param 'limit' was replaced by 'nsamples' "
+                          "(fraction of the split, e.g. 0.002)",
+            )
+        nsamples = float(test_params.get("nsamples", 0.002))
+        segments = int(test_params.get("segments", 2))
+        exact = bool(test_params.get("exact", False))
         instruction = test_params.get("instruction", "Describe this image briefly.")
         image_size = int(test_params.get("image_size", 896))
         max_length = int(test_params.get("max_length", 1024))
@@ -39,12 +47,15 @@ class PPLVLMTest(BaseTest):
             "-m", model_dir,
             "-d", dataset,
             "-s", split,
-            "-n", str(limit),
+            "-n", str(nsamples),
+            "--segments", str(segments),
             "--instruction", instruction,
             "--image_size", str(image_size),
             "--max_length", str(max_length),
             "-v",
         ]
+        if exact:
+            cmd.append("--exact")
 
         # Run perplexity_vlm.py directly (not via BaseTest.run_subprocess) so its
         # top-level onnxruntime.dll pre-load runs BEFORE onnxruntime_genai is
@@ -84,9 +95,16 @@ class PPLVLMTest(BaseTest):
             if m2:
                 metrics["samples_evaluated"] = int(m2.group(1))
                 metrics["samples_total"] = int(m2.group(2))
-            m3 = re.search(r"Total target tokens:\s*(\d+)", stdout)
+            m3 = re.search(r"Scored points\s*:\s*(\d+)", stdout)
             if m3:
-                metrics["target_tokens"] = int(m3.group(1))
+                metrics["scored_points"] = int(m3.group(1))
+
+            # Per-stage mean NLL (sampled scoring), so a regression can be
+            # localised to the prompt-only prefill or a caption segment.
+            m4 = re.search(r"Stage NLL\s*:(.*)", stdout)
+            if m4:
+                for label, value in re.findall(r"(\w+)=([\d.]+)\(n=\d+\)", m4.group(1)):
+                    metrics[f"nll_{label}"] = float(value)
             return TestResult(success=True, metrics=metrics,
                               stdout=stdout, stderr=stderr)
 

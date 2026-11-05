@@ -152,7 +152,7 @@ If a dynamic model has only one config, map every length to the same file, e.g. 
             "params": {
                 "dataset": "lmms-lab/flickr30k",
                 "split": "test",
-                "limit": 50,
+                "nsamples": 0.002,
                 "image_size": 896,
                 "max_length": 1024,
                 "instruction": "Describe this image briefly."
@@ -218,10 +218,18 @@ No extra required parameters; the sequence length comes from `seq_lengths`.
 |---|---|---|
 | `dataset` | `lmms-lab/flickr30k` | dataset |
 | `split` | `test` | split |
-| `limit` | `50` | number of samples |
+| `nsamples` | `0.002` | fraction of the split to evaluate, taken from the start of the split (e.g. `0.002` = 0.2%, about 60 flickr30k images). Replaces the former `limit` count |
+| `segments` | `2` | sampled scoring: number of caption segments whose midpoints are scored in addition to the first caption token (see below) |
+| `exact` | `false` | score every caption token instead of the sampled positions (slow) |
 | `image_size` | `896` | square side length the image is resized to (also fixes the image-token count) |
 | `max_length` | `1024` | OGA KV-buffer cap; also the per-sample inclusion threshold (samples longer than this are skipped). |
 | `instruction` | `Describe this image briefly.` | prompt instruction |
+
+**Scoring.** The caption is scored in the model's answer slot (chat template rendered with `enable_thinking=false`; prompt and caption tokenized separately and joined at the id level). Each sample scores a fixed set of caption positions with one Generator: `p0` (first caption token, from the prompt-only prefill) plus the midpoint of each of `segments` equal segments of the rest (`seg1` ... `segK`). The positions depend only on the caption length, so every run scores the same tokens. `Perplexity` is `exp(mean NLL)` over all scored points with equal weight; per-stage mean NLL is reported as `nll_p0` / `nll_seg1` / ... to localise a regression.
+
+- The Generator advances with `append_tokens`, always by at least two tokens, so only multi-token (prefill-style) kernels are exercised. Single-token decode kernels are **not** covered; test them with per-op numeric tests.
+- Sampled scoring requires `append_tokens` (continuous decoding). If the runtime does not support it the test fails with an error; use `exact: true`, which does not need it.
+- `exact` gives a different, much slower number. Do not mix baselines across modes.
 
 ---
 
