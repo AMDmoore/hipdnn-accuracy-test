@@ -191,6 +191,7 @@ Notes:
 |---|---|---|
 | `nsamples` | `1.0` | sampling ratio/count (e.g. `0.1` = 10%); smaller is faster |
 | `stride` | `256` | sliding-window stride; only applies to the pruned (last-position-only logits) path (full-logits models ignore it). |
+| `bos` | `auto` | sequence-start prefix for every window. `auto` prepends whatever the OGA tokenizer adds at the start of a sequence when special tokens are enabled (e.g. BOS), and nothing for tokenizers that add none; `never` disables it (legacy behaviour). `seq_len` counts corpus tokens only, so the model input is `seq_len` plus the prefix length (the corpus slicing and scored labels are the same with and without the prefix). The corpus is always encoded with the OGA tokenizer. |
 
 ### MMLU (multi-subject multiple choice)
 

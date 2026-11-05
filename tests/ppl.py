@@ -2,9 +2,10 @@
 
 Calls tests/PPL/perplexity.py as a subprocess.
 
-The PPL "window" (``-l``) is just the length of each wikitext2 chunk that
-perplexity.py scores (``test_enc[i*seqlen:(i+1)*seqlen]``); it is NOT tied to
-any model-side fixed length. The window comes from the orchestrator's
+The PPL "window" (``-l``) is just the number of wikitext2 corpus tokens per
+window that perplexity.py scores; the model's start prefix (e.g. BOS), if any,
+is added on top of it. It is NOT tied to any model-side fixed length. The
+window comes from the orchestrator's
 per-iteration ``seq_len`` (injected into ``test_params``); ``seq_lengths`` in
 test_config.json is therefore a pure window-size sweep, one dynamic config
 serving every entry.
@@ -24,7 +25,7 @@ class PPLTest(BaseTest):
                 test_params: dict) -> TestResult:
         script = os.path.join(os.path.dirname(__file__), "PPL", "perplexity.py")
 
-        # -l: the wikitext2 chunk window (sequence length scored per chunk).
+        # -l: wikitext2 corpus tokens per window (start prefix not included).
         seqlen = test_params.get("seq_len")
         if seqlen is None:
             return TestResult(
@@ -36,8 +37,9 @@ class PPLTest(BaseTest):
         nsamples = test_params.get("nsamples", 1.0)
 
         # -c: OGA search.max_length / KV buffer. Same value as the window here,
-        # but distinct semantics — each chunk feeds exactly seqlen tokens, so KV
-        # only needs to cover the window. Passing it explicitly avoids OGA
+        # but distinct semantics — KV only needs to cover one window.
+        # perplexity.py raises it to seqlen plus the start-prefix length when
+        # the window carries a prefix. Passing it explicitly avoids OGA
         # falling back to the model's huge architectural context_length (e.g.
         # 131072) and over-allocating.
         context_length = int(test_params.get("context_length", seqlen))
@@ -57,6 +59,12 @@ class PPLTest(BaseTest):
         stride = test_params.get("stride")
         if stride is not None:
             cmd += ["--stride", str(int(stride))]
+
+        # --bos auto|never: whether each window gets the tokenizer's sequence-
+        # start prefix. Omitted -> perplexity.py default (auto).
+        bos = test_params.get("bos")
+        if bos is not None:
+            cmd += ["--bos", str(bos)]
 
         rc, stdout, stderr = self.run_subprocess(cmd)
 
