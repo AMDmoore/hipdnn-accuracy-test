@@ -155,7 +155,7 @@ If a dynamic model has only one config, map every length to the same file, e.g. 
                 "nsamples": 0.002,
                 "image_size": 896,
                 "max_length": 1024,
-                "instruction": "Describe this image briefly."
+                "instruction": "Describe this image briefly without any introductory phrase."
             }
         }
     }
@@ -223,7 +223,7 @@ No extra required parameters; the sequence length comes from `seq_lengths`.
 | `exact` | `false` | score every caption token instead of the sampled positions (slow) |
 | `image_size` | `896` | square side length the image is resized to (also fixes the image-token count) |
 | `max_length` | `1024` | OGA KV-buffer cap; also the per-sample inclusion threshold (samples longer than this are skipped). |
-| `instruction` | `Describe this image briefly.` | prompt instruction |
+| `instruction` | `Describe this image briefly without any introductory phrase.` | prompt instruction; asking for no preamble keeps models that open with "Here's a description" from scoring the first caption token as a near-impossible prediction |
 
 **Scoring.** The caption is scored in the model's answer slot (chat template rendered with `enable_thinking=false`; prompt and caption tokenized separately and joined at the id level). Each sample scores a fixed set of caption positions with one Generator: `p0` (first caption token, from the prompt-only prefill) plus the midpoint of each of `segments` equal segments of the rest (`seg1` ... `segK`). The positions depend only on the caption length, so every run scores the same tokens. `Perplexity` is `exp(mean NLL)` over all scored points with equal weight; per-stage mean NLL is reported as `nll_p0` / `nll_seg1` / ... to localise a regression.
 

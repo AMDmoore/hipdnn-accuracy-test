@@ -38,7 +38,7 @@ class PPLVLMTest(BaseTest):
         nsamples = float(test_params.get("nsamples", 0.002))
         segments = int(test_params.get("segments", 2))
         exact = bool(test_params.get("exact", False))
-        instruction = test_params.get("instruction", "Describe this image briefly.")
+        instruction = test_params.get("instruction", "Describe this image briefly without any introductory phrase.")
         image_size = int(test_params.get("image_size", 896))
         max_length = int(test_params.get("max_length", 1024))
 

@@ -598,7 +598,7 @@ if __name__ == "__main__":
                              "positions (slow: one prefill per token on a "
                              "pruned-logits graph)")
     parser.add_argument("--instruction", type=str,
-                        default="Describe this image briefly.",
+                        default="Describe this image briefly without any introductory phrase.",
                         help="Text instruction sent with the image")
     parser.add_argument("--image_size", type=int, default=896,
                         help="Square resize size for input images. Default: 896")
