@@ -1,3 +1,20 @@
+"""Wikitext2 perplexity for OGA models.
+
+Scoring is prefill-only teacher forcing: every scored token comes from a real
+prefill over a window, never from decode. The strategy is picked by probing the
+model's logits shape once:
+  - full logits   -> disjoint chunks of ``-l`` corpus tokens, each prefilled
+                     once and scored at every position but the first.
+  - pruned logits -> strided sliding window; only the token right after each
+                     window is scored.
+
+Every window is the tokenizer's sequence-start prefix (see start_prefix.py)
+followed by ``-l`` corpus tokens. The prefix is not counted in ``-l`` and is
+never a scored label.
+
+The last stdout line is ``Perplexity: <value>``, which tests/ppl.py parses.
+"""
+
 import onnxruntime_genai as og
 import argparse
 import os
@@ -201,14 +218,16 @@ def main(args):
     tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
 
-    # The corpus carries no special tokens. Every window is the start prefix
-    # (the ids the tokenizer adds at the start of a sequence when special
-    # tokens are enabled; empty for tokenizers that add none) followed by
-    # exactly -l corpus tokens, so slicing and labels are prefix-independent.
+    # The corpus is encoded without special tokens; the start prefix is added
+    # per window below.
     tokenizer.update_options(add_special_tokens="false")
     test_enc = get_wikitext2(tokenizer, dataset=args.dataset)
     if args.verbose: print("Dataset acquired")
 
+    # The prefix is the ids the tokenizer adds at the start of a sequence when
+    # special tokens are enabled (empty for tokenizers that add none). Every
+    # window is the prefix followed by exactly -l corpus tokens, so slicing and
+    # labels are prefix-independent.
     seqlen = args.max_length
     start_prefix = resolve_start_prefix(tokenizer, args.bos)
     prefix = np.asarray(start_prefix.ids, dtype=np.int32)
@@ -247,8 +266,8 @@ def main(args):
     print("Perplexity:", ppl.item())
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="End-to-end token generation loop example for gen-ai")
-    parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
+    parser = argparse.ArgumentParser(description="Wikitext2 perplexity for OGA models")
+    parser.add_argument('-m', '--model', type=str, required=True, help='OGA model folder path (must contain genai_config.json and the model files it references)')
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, required=True, help='Window length in corpus tokens; the start prefix (if any) is added on top of it')
     parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
@@ -256,8 +275,8 @@ def parse_args():
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
     parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
-    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
-    parser.add_argument('-n', '--nsamples', type=float, default = 1.0, help='Number of samples of wikitext2 to use in computing the perplexity')
+    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output. Defaults to false')
+    parser.add_argument('-n', '--nsamples', type=float, default = 1.0, help='Fraction of the wikitext2 test corpus to score, in (0, 1]. Default 1.0')
     parser.add_argument('-d', "--device", required=False, default="cpu", choices=["cpu", "aie"], help="Target device (CPU or Ryzen-AI)")
     parser.add_argument('-s', "--dataset", required=False, default="raw", choices=["raw", "non-raw"], help="Wikitext2 dataset version (raw or non-raw). Defaults to 'raw'")
     parser.add_argument('-c', '--context-length', type=int, default=None, help='Context length (max_length for OGA); raised to fit prefix + -l if smaller. If not set, reads from genai_config.json')
