@@ -275,38 +275,6 @@ class VlmPplScorer:
             print(f"Model loaded; chat_template "
                   f"{'found' if self.template_str else 'missing'}")
 
-    def score(self, img: Optional[Image.Image], caption: str) -> Optional[Scored]:
-        """Return one (stage, NLL) per scored caption token, or None to skip.
-
-        ``img=None`` runs the text-only prompt (``--mode none``).
-        """
-        oga_image, tmp_path = None, None
-        if img is not None:
-            oga_image, tmp_path = pil_to_oga_image(img, self.image_size)
-        try:
-            sample = self._prepare(oga_image, caption)
-            if sample is None:
-                return None
-            if self.verbose:
-                print(f"  [teacher-forced] full_len={sample.full_len}, "
-                      f"prompt_len={sample.prompt_len}, "
-                      f"target_len={sample.target_len}")
-            if self.exact:
-                scored = self._score_exact(sample)
-            else:
-                scored = self._score_sampled(sample)
-            if scored is None or not all(np.isfinite(v) for _, v in scored):
-                if self.verbose:
-                    print("  [skip] non-finite NLL")
-                return None
-            return scored
-        finally:
-            if tmp_path is not None:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
     def _prepare(self, oga_image, caption: str) -> Optional[PreparedSample]:
         # add_generation_prompt appends the assistant role-open turn, which is
         # where the caption tokens logically continue.
@@ -356,6 +324,38 @@ class VlmPplScorer:
         )
         return og.Generator(self.model, params)
 
+    def score(self, img: Optional[Image.Image], caption: str) -> Optional[Scored]:
+        """Return one (stage, NLL) per scored caption token, or None to skip.
+
+        ``img=None`` runs the text-only prompt (``--mode none``).
+        """
+        oga_image, tmp_path = None, None
+        if img is not None:
+            oga_image, tmp_path = pil_to_oga_image(img, self.image_size)
+        try:
+            sample = self._prepare(oga_image, caption)
+            if sample is None:
+                return None
+            if self.verbose:
+                print(f"  [teacher-forced] full_len={sample.full_len}, "
+                      f"prompt_len={sample.prompt_len}, "
+                      f"target_len={sample.target_len}")
+            if self.exact:
+                scored = self._score_exact(sample)
+            else:
+                scored = self._score_sampled(sample)
+            if scored is None or not all(np.isfinite(v) for _, v in scored):
+                if self.verbose:
+                    print("  [skip] non-finite NLL")
+                return None
+            return scored
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
     # -- sampled scheme ------------------------------------------------------
 
     def _score_sampled(self, sample: PreparedSample) -> Optional[Scored]:
@@ -363,13 +363,13 @@ class VlmPplScorer:
         if self.verbose:
             print(f"  [sampled] positions={positions} of {sample.target_len}")
         try:
-            return self._score_positions_continuous(sample, positions)
+            return self._score_sampled_positions(sample, positions)
         except RuntimeError as e:
             raise RuntimeError(
                 f"sampled scoring failed ({e}); it needs append_tokens "
                 f"(continuous decoding). Use --exact for a path without it.") from e
 
-    def _score_positions_continuous(self, sample: PreparedSample,
+    def _score_sampled_positions(self, sample: PreparedSample,
                                     positions: List[int]) -> Scored:
         """One Generator: prefill the prompt, then append up to each position."""
         caption = sample.caption_ids
@@ -438,10 +438,10 @@ class VlmPplScorer:
             rows = _logit_rows(generator.get_output("logits"))
         finally:
             del generator
-        if rows.shape[0] < sample.full_len:
+        if rows.shape[0] != sample.full_len:
             raise RuntimeError(
-                f"full-logits scoring needs {sample.full_len} logits rows but the "
-                f"model returned {rows.shape[0]}")
+                f"full-logits scoring needs exactly {sample.full_len} logits rows "
+                f"(one per input token) but the model returned {rows.shape[0]}")
         caption = sample.caption_ids
         return [(EXACT_STAGE, _token_nll(rows[sample.prompt_len + j - 1], caption[j]))
                 for j in range(sample.target_len)]
