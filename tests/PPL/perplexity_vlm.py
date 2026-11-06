@@ -388,21 +388,6 @@ class VlmPplScorer:
             del generator
         return scored
 
-    def _score_positions_fresh(self, sample: PreparedSample, positions) -> Scored:
-        """One prefill of prompt + caption[:pos] per position."""
-        caption = sample.caption_ids
-        scored: Scored = []
-        for pos in positions:
-            generator = self._generator(sample.full_len)
-            try:
-                generator.set_inputs(_inputs_with_ids(
-                    sample.prompt_inputs, sample.full_ids[:sample.prompt_len + pos]))
-                row = _logit_rows(generator.get_output("logits"))[-1]
-            finally:
-                del generator
-            scored.append((EXACT_STAGE, _token_nll(row, caption[pos])))
-        return scored
-
     # -- exact scheme (every caption token) ----------------------------------
 
     def _probe_pruned(self, sample: PreparedSample) -> bool:
@@ -432,7 +417,18 @@ class VlmPplScorer:
 
     def _score_exact_pruned(self, sample: PreparedSample) -> Scored:
         """One prefill per caption position: image + prompt + caption[:j]."""
-        return self._score_positions_fresh(sample, range(sample.target_len))
+        caption = sample.caption_ids
+        scored: Scored = []
+        for j in range(sample.target_len):
+            generator = self._generator(sample.full_len)
+            try:
+                generator.set_inputs(_inputs_with_ids(
+                    sample.prompt_inputs, sample.full_ids[:sample.prompt_len + j]))
+                row = _logit_rows(generator.get_output("logits"))[-1]
+            finally:
+                del generator
+            scored.append((EXACT_STAGE, _token_nll(row, caption[j])))
+        return scored
 
     def _score_exact_full(self, sample: PreparedSample) -> Scored:
         """One prefill of prompt+caption; row t predicts token t+1."""
