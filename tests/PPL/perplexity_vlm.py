@@ -36,7 +36,6 @@ Output line that the wrapper parses:
 """
 
 import argparse
-import ctypes
 import json
 import os
 import sys
@@ -44,51 +43,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
-
-
-def _preload_runtime_onnxruntime_dll() -> None:
-    """Pre-load a custom ``onnxruntime.dll`` BEFORE importing onnxruntime_genai.
-
-    Pip's ``onnxruntime`` may be too old for the active model (e.g. Qwen3.5
-    needs ``com.microsoft:CausalConvWithState`` which is only in ORT 1.25+).
-    OGA's ``_dll_directory.add_onnxruntime_dependency`` checks ``GetModuleHandleW``
-    first and skips its own load if a compatible ``onnxruntime.dll`` is already
-    in-process — so pre-loading our package's DLL transparently overrides
-    pip's stale one.
-
-    Source order:
-      1. ``HIPDNN_PPL_ORT_DLL`` env var (full path) — explicit override
-      2. First ``onnxruntime.dll`` found on PATH (package_dir/bin is prepended
-         by run_accuracy.py via ``setup_package_env``)
-
-    Silently does nothing on failure — falls back to whatever OGA loads itself,
-    which is fine for models that don't need a newer schema.
-    """
-    explicit = os.environ.get("HIPDNN_PPL_ORT_DLL")
-    candidates = []
-    if explicit:
-        candidates.append(explicit)
-    for d in (os.environ.get("PATH", "") or "").split(os.pathsep):
-        if not d:
-            continue
-        cand = os.path.join(d, "onnxruntime.dll")
-        if os.path.isfile(cand):
-            candidates.append(cand)
-            break  # first hit on PATH is enough; OGA's GetModuleHandleW
-                   # will then short-circuit its own DLL loading
-
-    for cand in candidates:
-        try:
-            os.add_dll_directory(os.path.dirname(cand))
-            ctypes.WinDLL(cand)
-            print(f"[perplexity_vlm] Pre-loaded onnxruntime.dll: {cand}")
-            return
-        except OSError as e:
-            print(f"[perplexity_vlm] WARN: failed to pre-load {cand}: {e}",
-                  file=sys.stderr)
-
-
-_preload_runtime_onnxruntime_dll()
 
 import numpy as np
 import onnxruntime_genai as og
