@@ -12,10 +12,10 @@
             "params": {
                 "dataset": "lmms-lab/flickr30k",
                 "split": "test",
-                "limit": 50,
+                "nsamples": 0.002,
                 "image_size": 896,
                 "max_length": 1024,
-                "instruction": "Describe this image briefly."
+                "instruction": "Describe this image briefly without any introductory phrase."
             }
         }
     }
