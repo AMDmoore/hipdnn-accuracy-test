@@ -11,11 +11,16 @@ import hashlib
 
 from start_prefix import MODES as BOS_MODES, resolve_start_prefix
 
+# Generation-style options accepted on the command line and forwarded to OGA
+# only when given.
+SEARCH_OPTION_NAMES = ['do_sample', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty']
+
 def get_wikitext2(tokenizer, dataset="non-raw"):
     """Encode the wikitext2 test split with the OGA tokenizer.
 
-    The stream is encoded without special tokens; the per-window start prefix
-    is added by the PPL loops (see start_prefix.py)."""
+    The caller must have disabled ``add_special_tokens``: the stream carries no
+    special tokens and the per-window start prefix is added by the PPL loops
+    (see start_prefix.py)."""
     from datasets import load_dataset
 
     if dataset == "non-raw":
@@ -27,25 +32,23 @@ def get_wikitext2(tokenizer, dataset="non-raw"):
             "You are using an unsupported dataset, only support wikitext2-raw-v1 and wikitext2-v1."
             "Using wikitext2-raw-v1 with --dataset=raw and wikitext2-v1 with --dataset=non-raw."
         )
-    tokenizer.update_options(add_special_tokens="false")
     return np.asarray(tokenizer.encode("\n\n".join(testdata["text"])), dtype=np.int32)
 
-def with_prefix(prefix_ids, tokens):
-    """Prepend the start prefix to a window of corpus tokens."""
-    if not prefix_ids:
-        return tokens
-    return np.concatenate((np.asarray(prefix_ids, dtype=np.int32), tokens))
+def make_window(prefix, tokens):
+    """Model input for one window: the start prefix followed by corpus tokens."""
+    return np.concatenate((prefix, tokens))
 
-def make_window(prefix_ids, tokens, seqlen, verbose=False, first=False):
-    """Build one model input: the start prefix followed by ``seqlen`` corpus tokens."""
-    window = with_prefix(prefix_ids, tokens)
-    p = len(prefix_ids)
-    assert len(window) == seqlen + p, (
-        f"window has {len(window)} tokens, expected {seqlen} + {p} prefix")
-    assert list(window[:p]) == list(prefix_ids), "window does not start with the prefix"
-    if verbose and first:
-        print(f"[window] first window: {len(window)} tokens, head ids {[int(t) for t in window[:p + 3]]}")
-    return window
+def prefill_logits(model, params, window):
+    """Logits rows of one real prefill: a fresh Generator per call, so there is
+    no KV reuse and no decode path. Returns a float32 tensor [rows, vocab].
+
+    The rows are copied out before the Generator is released."""
+    generator = og.Generator(model, params)
+    try:
+        generator.append_tokens(window)
+        return torch.tensor(generator.get_output("logits")[0], dtype=torch.float32)
+    finally:
+        del generator
 
 def detect_pruned_logits(model, params, test_enc, seqlen):
     """Probe once whether the decoder emits full-sequence logits [B,T,V] or
@@ -68,7 +71,7 @@ def detect_pruned_logits(model, params, test_enc, seqlen):
         seq_dim = 1
     return seq_dim < probe_len
 
-def run_full_logits_ppl(model, params, test_enc, seqlen, prefix_ids, nsamples_frac, verbose):
+def run_full_logits_ppl(model, params, test_enc, seqlen, prefix, nsamples_frac, verbose):
     """Non-pruned path: full-sequence logits per chunk.
 
     The corpus is partitioned into disjoint chunks of ``seqlen`` corpus tokens,
@@ -81,8 +84,6 @@ def run_full_logits_ppl(model, params, test_enc, seqlen, prefix_ids, nsamples_fr
     context, and the prefix row that would predict it is dropped), so every
     window scores exactly seqlen-1 tokens with or without a prefix."""
     n_scored = seqlen - 1
-    if n_scored < 1:
-        raise ValueError(f"seqlen={seqlen} leaves no scored tokens")
     nsamples = int(nsamples_frac * (len(test_enc) // seqlen))
     if nsamples < 1:
         raise ValueError(
@@ -91,16 +92,14 @@ def run_full_logits_ppl(model, params, test_enc, seqlen, prefix_ids, nsamples_fr
     if verbose:
         print(f"[full-logits] nsamples (chunks): {nsamples}")
         print(f"nbr of tokens in testenc: {len(test_enc)}")
-        print(f"seqlen: {seqlen} (+ prefix {len(prefix_ids)} per window)")
+        print(f"seqlen: {seqlen} (+ prefix {len(prefix)} per window)")
         print("Running generation loop ...")
+    loss_fct = torch.nn.CrossEntropyLoss()
     nlls = []
     with torch.no_grad():
         for i in range(nsamples):
-            window = make_window(prefix_ids, test_enc[(i * seqlen) : ((i + 1) * seqlen)],
-                                 seqlen, verbose, first=(i == 0))
-            generator = og.Generator(model, params)
-            generator.append_tokens(window)
-            logits = torch.tensor(generator.get_output("logits")[0], dtype=torch.float32)
+            window = make_window(prefix, test_enc[i * seqlen : (i + 1) * seqlen])
+            logits = prefill_logits(model, params, window)
             # A full-logits graph returns one row per input token. With chunked
             # prefill, get_output("logits") holds only the last chunk's rows
             # (earlier chunks are overwritten), so any other row count means the
@@ -108,22 +107,18 @@ def run_full_logits_ppl(model, params, test_enc, seqlen, prefix_ids, nsamples_fr
             if logits.shape[0] != len(window):
                 raise RuntimeError(
                     f"full-logits PPL needs {len(window)} logits rows per window "
-                    f"({seqlen} corpus tokens + {len(prefix_ids)} prefix) but the "
+                    f"({seqlen} corpus tokens + {len(prefix)} prefix) but the "
                     f"model returned {logits.shape[0]}; prefill chunking "
                     f"(search.chunk_size) keeps only the last chunk's logits")
             # Rows [-seqlen:-1] sit on chunk[0..seqlen-2] and predict chunk[1:],
             # the last seqlen-1 tokens of the window.
             shift_logits = logits[-seqlen:-1]
             shift_labels = torch.tensor(window[-n_scored:], dtype=torch.long)
-            loss_fct = torch.nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits, shift_labels)
-            neg_log_likelihood = loss.float() * n_scored
-            nlls.append(neg_log_likelihood)
-            del generator
+            nlls.append(loss_fct(shift_logits, shift_labels).float() * n_scored)
             print(f"Iteration {i+1} / {nsamples} done", end ='\r')
         return torch.exp(torch.stack(nlls).sum() / (nsamples * n_scored))
 
-def run_pruned_ppl(model, params, test_enc, seqlen, prefix_ids, stride, nsamples_frac, verbose):
+def run_pruned_ppl(model, params, test_enc, seqlen, prefix, stride, nsamples_frac, verbose):
     """Pruned path: last-position-only logits via a strided sliding window.
 
     A pruned graph emits logits only for the final input position, so each
@@ -156,34 +151,41 @@ def run_pruned_ppl(model, params, test_enc, seqlen, prefix_ids, stride, nsamples
     num_windows = max(1, min(num_windows, max_windows))
 
     if verbose:
-        print(f"[pruned] sliding window: stride={stride}, seqlen={seqlen} (+ prefix {len(prefix_ids)} per window)")
+        print(f"[pruned] sliding window: stride={stride}, seqlen={seqlen} (+ prefix {len(prefix)} per window)")
         print(f"nbr of tokens in testenc: {len(test_enc)}")
         print(f"[pruned] nsamples (windows) = {num_windows} window prefills")
         print("Running generation loop ...")
 
-    cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='sum')
     with torch.no_grad():
-        tensor_arrays = []
+        last_rows = []
         for i in range(num_windows):
-            input_tokens = make_window(prefix_ids, test_enc[i * stride : (i * stride + seqlen)],
-                                       seqlen, verbose, first=(i == 0))
-            generator = og.Generator(model, params)
-            generator.append_tokens(input_tokens)
-            # [0] -> batch 0; [-1] -> last position (the only one for pruned).
-            logits = generator.get_output("logits")[0][-1].reshape((1, -1))
-            tensor_arrays.append(torch.tensor(logits, dtype=torch.float32))
-            del generator
+            window = make_window(prefix, test_enc[i * stride : (i * stride + seqlen)])
+            # Last row = the only one for a pruned graph.
+            last_rows.append(prefill_logits(model, params, window)[-1:])
             print(f"Iteration {i+1} / {num_windows} done", end='\r')
 
-        logits_tensor = torch.cat(tensor_arrays)
+        logits_tensor = torch.cat(last_rows)
         label_tensor = torch.tensor(
             test_enc[seqlen : (seqlen + num_windows * stride) : stride],
             dtype=torch.long)
         if verbose:
             print(f"logits_tensor shape={tuple(logits_tensor.shape)} "
                   f"label_tensor shape={tuple(label_tensor.shape)}")
-        loss = cross_entropy_loss(logits_tensor, label_tensor)
+        loss = torch.nn.CrossEntropyLoss(reduction='sum')(logits_tensor, label_tensor)
         return torch.exp(loss / num_windows)
+
+def make_generator_params(model, args, prefix_len):
+    """GeneratorParams whose KV capacity holds the whole window."""
+    params = og.GeneratorParams(model)
+    search_options = {name: getattr(args, name) for name in SEARCH_OPTION_NAMES
+                      if getattr(args, name, None) is not None}
+    if args.context_length is not None:
+        # KV capacity must hold the whole window: prefix + seqlen corpus tokens.
+        search_options['max_length'] = max(args.context_length, args.max_length + prefix_len)
+    params.set_search_options(**search_options)
+    if hasattr(params, 'try_graph_capture_with_max_batch_size'):
+        params.try_graph_capture_with_max_batch_size(1)
+    return params
 
 def main(args):
     # Plugin EP registration is handled by OGA itself from the <EP>_EP_PATH env
@@ -199,35 +201,26 @@ def main(args):
     tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
 
-    test_enc = get_wikitext2(tokenizer, dataset=args.dataset)
-    if args.verbose: print("Dataset acquired")
-
     # The corpus carries no special tokens. Every window is the start prefix
     # (the ids the tokenizer adds at the start of a sequence when special
     # tokens are enabled; empty for tokenizers that add none) followed by
     # exactly -l corpus tokens, so slicing and labels are prefix-independent.
+    tokenizer.update_options(add_special_tokens="false")
+    test_enc = get_wikitext2(tokenizer, dataset=args.dataset)
+    if args.verbose: print("Dataset acquired")
+
+    seqlen = args.max_length
     start_prefix = resolve_start_prefix(tokenizer, args.bos)
-    prefix_ids = list(start_prefix.ids)
-    print(f"[start-prefix] mode={args.bos} source={start_prefix.source} ids={prefix_ids}")
+    prefix = np.asarray(start_prefix.ids, dtype=np.int32)
+    print(f"[start-prefix] mode={args.bos} source={start_prefix.source} ids={prefix.tolist()}")
     print(f"[corpus] tokens={len(test_enc)} "
           f"sha256={hashlib.sha256(test_enc.tobytes()).hexdigest()[:16]}")
+    if args.verbose:
+        head = make_window(prefix, test_enc[:3]).tolist()
+        print(f"[window] model input = {len(prefix)} prefix + {seqlen} corpus tokens, head ids {head}")
 
-    # set generator parameters
-    params = og.GeneratorParams(model)
-    search_options = {name:getattr(args, name) for name in ['do_sample', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
-
-    if not hasattr(args, 'max_length'):
-        raise ValueError("-l (seqlen / fixed_prompt_length) is required for PPL")
-    seqlen = args.max_length
-    if hasattr(args, 'context_length') and args.context_length is not None:
-        # KV capacity must hold the whole window: prefix + seqlen corpus tokens.
-        search_options['max_length'] = max(args.context_length, seqlen + len(prefix_ids))
-    params.set_search_options(**search_options)
-    if hasattr(params, 'try_graph_capture_with_max_batch_size'):
-        params.try_graph_capture_with_max_batch_size(1)
+    params = make_generator_params(model, args, len(prefix))
     if args.verbose: print("GeneratorParams created")
-
-    assert args.nsamples<=1.0, "nsamples must be less than 1!"
 
     # A prune-logits model emits only last-position logits, which breaks the
     # full-sequence chunk path (the shifted logits rows would be missing). Probe
@@ -240,8 +233,7 @@ def main(args):
         print(f"[detect] logits mode: {'PRUNED (last-position only)' if pruned else 'FULL sequence'}")
 
     if pruned:
-        stride = int(getattr(args, 'stride', 256))
-        ppl = run_pruned_ppl(model, params, test_enc, seqlen, prefix_ids, stride,
+        ppl = run_pruned_ppl(model, params, test_enc, seqlen, prefix, args.stride,
                              args.nsamples, args.verbose)
     else:
         # Scoring needs every position's logits from one prefill. A model config
@@ -250,15 +242,15 @@ def main(args):
         # prefill, so the computed logits are unchanged. The pruned path is not
         # affected: its single output row is the last position either way.
         params.set_search_options(chunk_size=0)
-        ppl = run_full_logits_ppl(model, params, test_enc, seqlen, prefix_ids,
+        ppl = run_full_logits_ppl(model, params, test_enc, seqlen, prefix,
                                   args.nsamples, args.verbose)
     print("Perplexity:", ppl.item())
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
+def parse_args():
+    parser = argparse.ArgumentParser(description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
-    parser.add_argument('-l', '--max_length', type=int, help='Window length in corpus tokens; the start prefix (if any) is added on top of it')
+    parser.add_argument('-l', '--max_length', type=int, required=True, help='Window length in corpus tokens; the start prefix (if any) is added on top of it')
     parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     parser.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
@@ -272,4 +264,13 @@ if __name__ == "__main__":
     parser.add_argument('--stride', type=int, default=256, help='Sliding-window stride for the pruned (last-position-only) PPL path. Ignored for full-logits models. Default 256')
     parser.add_argument('--bos', choices=BOS_MODES, default='auto', help="Sequence-start prefix for every window. 'auto' prepends whatever the OGA tokenizer adds at the start of a sequence when special tokens are enabled (nothing for tokenizers that add none); 'never' disables it. Default auto")
     args = parser.parse_args()
-    main(args)
+    if args.max_length < 2:
+        parser.error("-l must be at least 2 (the first token of a window is not scored)")
+    if not 0.0 < args.nsamples <= 1.0:
+        parser.error("-n must be in (0, 1]")
+    if args.stride < 1:
+        parser.error("--stride must be at least 1")
+    return args
+
+if __name__ == "__main__":
+    main(parse_args())
