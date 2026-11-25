@@ -216,12 +216,29 @@ def mmlu(model, framework="pytorch", max_new_tokens=50, nsamples=30,
             generator = og.Generator(model, params)
             generator.append_tokens(input_ids)
             outputs = generator.get_output("logits")
-            # Model uses fixed_prompt_length, so the logits tensor is padded to
-            # that length. We must read at the last *real* input position
-            # (input_ids is left-aligned with right padding); reading [:, -1, :]
-            # would return logits at a padding position and yield garbage.
-            last_real_pos = input_ids.shape[1] - 1
-            logits = torch.tensor(outputs)[:, last_real_pos, :]
+            logits_all = torch.tensor(outputs)
+            # Same probe as perplexity.detect_pruned_logits: a prune-logits
+            # graph emits only the last position ([B,1,V]) regardless of the
+            # input length, while a full graph emits [B,T,V].
+            if logits_all.ndim == 3:
+                seq_dim = logits_all.shape[1]
+            elif logits_all.ndim == 2:
+                logits_all = logits_all.unsqueeze(0)
+                seq_dim = logits_all.shape[1]
+            else:
+                raise ValueError(
+                    f"Unexpected logits rank {logits_all.ndim}, shape {tuple(logits_all.shape)}"
+                )
+            if seq_dim == 1:
+                # Pruned: the only position is already the last real token.
+                logits = logits_all[:, -1, :]
+            else:
+                # Full logits: model uses fixed_prompt_length, so the tensor is
+                # padded to that length. Read at the last *real* input position
+                # (input_ids is left-aligned with right padding); reading
+                # [:, -1, :] would return a padding position and yield garbage.
+                last_real_pos = input_ids.shape[1] - 1
+                logits = logits_all[:, last_real_pos, :]
         else:
             attention_mask = input_ids.ne(tokenizer.pad_token_id)
             outputs = model(input_ids, attention_mask=attention_mask)["logits"]
